@@ -1,4 +1,6 @@
+
 import 'package:flutter/material.dart';
+import 'services/gmail_auth_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -219,6 +221,9 @@ class AccountSetupScreen extends StatefulWidget {
 class _AccountSetupScreenState extends State<AccountSetupScreen> {
   String _method = 'automatic';
   final _email = TextEditingController();
+  final GmailAuthService _gmailAuth = GmailAuthService();
+
+  bool _connecting = false;
 
   @override
   void dispose() {
@@ -226,12 +231,78 @@ class _AccountSetupScreenState extends State<AccountSetupScreen> {
     super.dispose();
   }
 
+  Future<void> _connectAccount() async {
+    final email = _email.text.trim();
+
+    final validEmail =
+        RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(email);
+
+    if (!validEmail) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Enter a valid email address.'),
+        ),
+      );
+      return;
+    }
+
+    if (_method == 'manual') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Manual IMAP/SMTP setup is not implemented yet.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _connecting = true);
+
+    try {
+      final authorization = await _gmailAuth.connectGmail();
+
+      if (!mounted) return;
+
+      if (authorization.email.toLowerCase() != email.toLowerCase()) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'You signed in as ${authorization.email}. '
+              'Enter that email address to continue.',
+            ),
+          ),
+        );
+        return;
+      }
+
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => CertificateIntroScreen(email: email),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Google sign-in failed: $error'),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _connecting = false);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: _connecting ? null : () => Navigator.pop(context),
           icon: const Icon(Icons.arrow_back_rounded),
         ),
         title: const Text(
@@ -277,8 +348,10 @@ class _AccountSetupScreenState extends State<AccountSetupScreen> {
             const SizedBox(height: 9),
             TextField(
               controller: _email,
+              enabled: !_connecting,
               keyboardType: TextInputType.emailAddress,
               autocorrect: false,
+              autofillHints: const [AutofillHints.email],
               decoration: const InputDecoration(
                 prefixIcon: Icon(Icons.alternate_email_rounded),
                 hintText: 'you@example.com',
@@ -300,7 +373,9 @@ class _AccountSetupScreenState extends State<AccountSetupScreen> {
               icon: Icons.auto_awesome_rounded,
               title: 'Automatic setup',
               description: 'Discover supported provider settings',
-              onTap: () => setState(() => _method = 'automatic'),
+              onTap: _connecting
+                  ? () {}
+                  : () => setState(() => _method = 'automatic'),
             ),
             const SizedBox(height: 10),
             SelectableOption(
@@ -308,7 +383,9 @@ class _AccountSetupScreenState extends State<AccountSetupScreen> {
               icon: Icons.tune_rounded,
               title: 'Manual IMAP / SMTP',
               description: 'For custom domains and advanced setups',
-              onTap: () => setState(() => _method = 'manual'),
+              onTap: _connecting
+                  ? () {}
+                  : () => setState(() => _method = 'manual'),
             ),
             const SizedBox(height: 20),
             Container(
@@ -345,46 +422,46 @@ class _AccountSetupScreenState extends State<AccountSetupScreen> {
             SizedBox(
               height: 54,
               child: FilledButton(
-                onPressed: () {
-                  final email = _email.text.trim();
-
-                  if (!email.contains('@') || email.endsWith('@')) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'Enter a valid email address to continue.',
-                        ),
-                      ),
-                    );
-                    return;
-                  }
-
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => CertificateIntroScreen(email: email),
-                    ),
-                  );
-                },
+                onPressed: _connecting ? null : _connectAccount,
                 style: FilledButton.styleFrom(
                   backgroundColor: const Color(0xFF69E0D0),
                   foregroundColor: const Color(0xFF071311),
+                  disabledBackgroundColor:
+                      const Color(0xFF365A56),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(16),
                   ),
                 ),
-                child: const Text(
-                  'Continue',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 16,
-                  ),
-                ),
+                child: _connecting
+                    ? const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Color(0xFF071311),
+                            ),
+                          ),
+                          SizedBox(width: 12),
+                          Text('Connecting to Google...'),
+                        ],
+                      )
+                    : const Text(
+                        'Continue',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 16,
+                        ),
+                      ),
               ),
             ),
             const SizedBox(height: 12),
             const Center(
               child: Text(
-                'Prototype flow · account connection is not active yet',
+                'Google authorization · mail sync not yet connected',
+                textAlign: TextAlign.center,
                 style: TextStyle(
                   color: Color(0xFF75869A),
                   fontSize: 11,
