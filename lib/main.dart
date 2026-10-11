@@ -1,10 +1,14 @@
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'providers.dart';
+import 'screens/inbox_view.dart';
 import 'services/gmail_auth_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const SignMailApp());
+  runApp(const ProviderScope(child: SignMailApp()));
 }
 
 class SignMailApp extends StatelessWidget {
@@ -50,7 +54,7 @@ class SignMailApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const WelcomeScreen(),
+      home: const StartupGate(),
     );
   }
 }
@@ -616,20 +620,33 @@ class CertificateIntroScreen extends StatelessWidget {
   }
 }
 
-class PrototypeHomeScreen extends StatefulWidget {
+class PrototypeHomeScreen extends ConsumerStatefulWidget {
   const PrototypeHomeScreen({super.key});
 
   @override
-  State<PrototypeHomeScreen> createState() => _PrototypeHomeScreenState();
+  ConsumerState<PrototypeHomeScreen> createState() =>
+      _PrototypeHomeScreenState();
 }
 
-class _PrototypeHomeScreenState extends State<PrototypeHomeScreen> {
+class _PrototypeHomeScreenState extends ConsumerState<PrototypeHomeScreen> {
   int _index = 0;
+
+  Future<void> _signOut() async {
+    final navigator = Navigator.of(context);
+    await ref.read(authServiceProvider).disconnect();
+    ref
+      ..invalidate(inboxProvider)
+      ..invalidate(savedEmailProvider);
+    navigator.pushAndRemoveUntil(
+      MaterialPageRoute<void>(builder: (_) => const WelcomeScreen()),
+      (route) => false,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final pages = [
-      const InboxScreen(),
+      const InboxView(),
       const CertificateScreen(),
       const SettingsScreen(),
     ];
@@ -651,16 +668,22 @@ class _PrototypeHomeScreenState extends State<PrototypeHomeScreen> {
         ),
         actions: [
           IconButton(
-            onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text(
-                    'Live sync is not connected in this prototype.',
-                  ),
-                ),
-              );
-            },
+            tooltip: 'Refresh',
+            onPressed: () => ref.read(inboxProvider.notifier).refresh(),
             icon: const Icon(Icons.sync_rounded),
+          ),
+          PopupMenuButton<String>(
+            onSelected: (value) {
+              if (value == 'signout') {
+                _signOut();
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem<String>(
+                value: 'signout',
+                child: Text('Sign out'),
+              ),
+            ],
           ),
         ],
       ),
@@ -705,93 +728,6 @@ class _PrototypeHomeScreenState extends State<PrototypeHomeScreen> {
           ),
         ],
       ),
-    );
-  }
-}
-
-class InboxScreen extends StatelessWidget {
-  const InboxScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 100),
-      children: [
-        const Text(
-          'Your inbox,\nwithout the noise.',
-          style: TextStyle(
-            fontSize: 29,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.8,
-            height: 1.1,
-          ),
-        ),
-        const SizedBox(height: 10),
-        const Text(
-          'A preview of the SignMail experience',
-          style: TextStyle(color: Color(0xFF8F9EAE)),
-        ),
-        const SizedBox(height: 22),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [Color(0xFF17332F), Color(0xFF14212B)],
-            ),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: const Color(0xFF2C5C52)),
-          ),
-          child: const Row(
-            children: [
-              Icon(
-                Icons.shield_outlined,
-                color: Color(0xFF69E0D0),
-                size: 30,
-              ),
-              SizedBox(width: 13),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Signature status at a glance',
-                      style: TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    SizedBox(height: 4),
-                    Text(
-                      'Signed, verified and unsigned messages will be clearly '
-                      'labelled.',
-                      style: TextStyle(
-                        color: Color(0xFFB5C9C5),
-                        fontSize: 12,
-                        height: 1.4,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 25),
-        const Text(
-          'RECENT MESSAGES',
-          style: TextStyle(
-            color: Color(0xFF7E8EA0),
-            fontSize: 11,
-            letterSpacing: 1.4,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        const SizedBox(height: 10),
-        const EmptyState(
-          icon: Icons.mark_email_unread_outlined,
-          title: 'Your messages will live here',
-          description:
-              'Connect an account to start synchronising your inbox. '
-              'These preview screens do not access real email.',
-        ),
-      ],
     );
   }
 }
@@ -1375,6 +1311,28 @@ class SettingsTile extends StatelessWidget {
         Icons.chevron_right_rounded,
         color: Color(0xFF718194),
       ),
+    );
+  }
+}
+
+/// Chooses the first screen: the inbox when an account is already connected
+/// on this device, otherwise the welcome flow.
+class StartupGate extends ConsumerWidget {
+  const StartupGate({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final saved = ref.watch(savedEmailProvider);
+
+    return saved.when(
+      data: (email) =>
+          email == null ? const WelcomeScreen() : const PrototypeHomeScreen(),
+      loading: () => const Scaffold(
+        body: Center(
+          child: CircularProgressIndicator(color: Color(0xFF69E0D0)),
+        ),
+      ),
+      error: (error, stackTrace) => const WelcomeScreen(),
     );
   }
 }
