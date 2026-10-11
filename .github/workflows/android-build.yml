@@ -13,6 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,10 +39,28 @@ jobs:
         run: |
           echo "=== Android application ID ==="
           grep -h 'applicationId' android/app/build.gradle android/app/build.gradle.kts 2>/dev/null || true
-          echo "=== Android signing fingerprints ==="
-          cd android
-          chmod +x gradlew
-          ./gradlew signingReport
+
+          echo "=== Generate debug keystore if missing ==="
+          mkdir -p "$HOME/.config/.android"
+
+          if [ ! -f "$HOME/.config/.android/debug.keystore" ]; then
+            keytool -genkeypair \
+              -v \
+              -keystore "$HOME/.config/.android/debug.keystore" \
+              -storepass android \
+              -alias AndroidDebugKey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          echo "=== Debug SHA-1 fingerprint ==="
+          keytool -list -v \
+            -keystore "$HOME/.config/.android/debug.keystore" \
+            -storepass android \
+            -alias AndroidDebugKey | grep -E 'SHA1:|SHA-1:'
 
       - name: Install dependencies
         run: flutter pub get
