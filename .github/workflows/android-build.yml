@@ -1,62 +1,62 @@
+
 name: SignMail Android Build
 
-'on':
-push:
-branches:
-- main
-workflow_dispatch:
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
-contents: read
+  contents: read
 
 jobs:
-build:
-runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-steps:
-  - name: Checkout repository
-    uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-  - name: Set up Java
-    uses: actions/setup-java@v4
-    with:
-      distribution: temurin
-      java-version: '17'
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
 
-  - name: Set up Flutter
-    uses: subosito/flutter-action@v2
-    with:
-      channel: stable
-      cache: true
+      - name: Generate Android project files
+        run: |
+          flutter create --platforms=android --org net.hexxal.signmail .
+          rm -f test/widget_test.dart
 
-  - name: Generate Android project files
-    run: |
-      flutter create --platforms=android --org net.hexxal.signmail .
-      rm -f test/widget_test.dart
+      - name: Show Android OAuth setup details
+        run: |
+          echo "=== Android application ID ==="
+          grep -h 'applicationId' android/app/build.gradle android/app/build.gradle.kts 2>/dev/null || true
+          echo "=== Android signing fingerprints ==="
+          cd android
+          chmod +x gradlew
+          ./gradlew signingReport
 
-  - name: Show Android OAuth setup details
-    run: |
-      echo "=== Android application ID ==="
-      grep -h 'applicationId' android/app/build.gradle android/app/build.gradle.kts 2>/dev/null || true
-      echo "=== Android signing fingerprints ==="
-      cd android
-      chmod +x gradlew
-      ./gradlew signingReport
+      - name: Install dependencies
+        run: flutter pub get
 
-  - name: Install dependencies
-    run: flutter pub get
+      - name: Analyze Dart code
+        run: flutter analyze
 
-  - name: Analyze Dart code
-    run: flutter analyze
+      - name: Build debug APK
+        run: flutter build apk --debug
 
-  - name: Build debug APK
-    run: flutter build apk --debug
-
-  - name: Upload APK
-    if: success()
-    uses: actions/upload-artifact@v4
-    with:
-      name: SignMail-debug-APK
-      path: build/app/outputs/flutter-apk/app-debug.apk
-      if-no-files-found: error
-      retention-days: 7
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SignMail-debug-APK
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
