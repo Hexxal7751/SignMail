@@ -35,18 +35,25 @@ jobs:
           flutter create --platforms=android --org net.hexxal.signmail .
           rm -f test/widget_test.dart
 
-      - name: Show Android OAuth setup details
+      - name: Restore persistent debug keystore
+        id: debug-keystore-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.config/.android/debug.keystore
+          key: signmail-debug-keystore-v1
+
+      - name: Create debug keystore if missing
         run: |
-          echo "=== Android application ID ==="
-          grep -h 'applicationId' android/app/build.gradle android/app/build.gradle.kts 2>/dev/null || true
+          KEYSTORE="$HOME/.config/.android/debug.keystore"
 
-          echo "=== Generate debug keystore if missing ==="
-          mkdir -p "$HOME/.config/.android"
+          mkdir -p "$(dirname "$KEYSTORE")"
 
-          if [ ! -f "$HOME/.config/.android/debug.keystore" ]; then
+          if [ ! -f "$KEYSTORE" ]; then
+            echo "No cached debug keystore found. Generating one."
+
             keytool -genkeypair \
               -v \
-              -keystore "$HOME/.config/.android/debug.keystore" \
+              -keystore "$KEYSTORE" \
               -storepass android \
               -alias AndroidDebugKey \
               -keypass android \
@@ -54,13 +61,25 @@ jobs:
               -keysize 2048 \
               -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
+          else
+            echo "Reusing the cached debug keystore."
           fi
 
+      - name: Show Android OAuth setup details
+        run: |
+          echo "=== Android application ID ==="
+          grep -h 'applicationId' \
+            android/app/build.gradle \
+            android/app/build.gradle.kts 2>/dev/null || true
+
+          echo ""
           echo "=== Debug SHA-1 fingerprint ==="
+
           keytool -list -v \
             -keystore "$HOME/.config/.android/debug.keystore" \
             -storepass android \
-            -alias AndroidDebugKey | grep -E 'SHA1:|SHA-1:'
+            -alias AndroidDebugKey |
+            grep -E 'SHA1:|SHA-1:'
 
       - name: Install dependencies
         run: flutter pub get
