@@ -1,8 +1,9 @@
 name: SignMail Android Build
 
-on:
+'on':
 push:
-branches: [main]
+branches:
+- main
 workflow_dispatch:
 
 permissions:
@@ -20,7 +21,7 @@ steps:
     uses: actions/setup-java@v4
     with:
       distribution: temurin
-      java-version: "17"
+      java-version: '17'
 
   - name: Set up Flutter
     uses: subosito/flutter-action@v2
@@ -35,19 +36,9 @@ steps:
 
   - name: Show Android OAuth setup details
     run: |
-      echo "========================================"
-      echo "SIGNMAIL ANDROID APPLICATION ID"
-      echo "========================================"
-
-      grep -h 'applicationId' \
-        android/app/build.gradle \
-        android/app/build.gradle.kts 2>/dev/null || true
-
-      echo ""
-      echo "========================================"
-      echo "ANDROID SIGNING REPORT"
-      echo "========================================"
-
+      echo "=== Android application ID ==="
+      grep -h 'applicationId' android/app/build.gradle android/app/build.gradle.kts 2>/dev/null || true
+      echo "=== Android signing fingerprints ==="
       cd android
       chmod +x gradlew
       ./gradlew signingReport
