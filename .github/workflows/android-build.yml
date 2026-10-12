@@ -1,4 +1,3 @@
-
 name: SignMail Android Build
 
 on:
@@ -91,15 +90,7 @@ jobs:
         run: flutter analyze --no-fatal-infos
 
       - name: Build debug APK
-        run: |
-          # Preferred: Android's built-in Kotlin support (no plugin warnings).
-          python3 tools/patch_android.py --builtin-kotlin
-
-          if ! flutter build apk --debug; then
-            echo "::warning::Built-in Kotlin build failed, retrying in compatibility mode"
-            python3 tools/patch_android.py --legacy-kotlin
-            flutter build apk --debug
-          fi
+        run: flutter build apk --debug
 
       - name: Upload APK
         if: success()

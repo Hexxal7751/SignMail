@@ -8,15 +8,11 @@ Run from anywhere after `flutter create`. It:
   * switches MainActivity to FlutterFragmentActivity (needed by local_auth)
 
 Every step is safe to run twice.
-
-Options:
-  --builtin-kotlin   switch the project to Android's built-in Kotlin support
-  --legacy-kotlin    switch back to the Flutter template defaults
 """
 import pathlib
 import re
-import shutil
 import sys
+import xml.dom.minidom
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 APP = ROOT / "android" / "app"
@@ -34,18 +30,48 @@ def fail(message: str) -> None:
     sys.exit(1)
 
 
+LAUNCH_BACKGROUND = """<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#FF0A0F16" />
+        </shape>
+    </item>
+</layer-list>
+"""
+
+
 def copy_resources() -> None:
     if not BRANDING.is_dir():
         fail(f"missing {BRANDING}")
     target = APP / "src" / "main" / "res"
     count = 0
     for source in BRANDING.rglob("*"):
-        if source.is_file():
-            destination = target / source.relative_to(BRANDING)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, destination)
-            count += 1
+        if not source.is_file() or source.name == "launch_background.xml":
+            continue  # the launch background is written by write_launch_background()
+        destination = target / source.relative_to(BRANDING)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.suffix == ".xml":
+            # Tolerate a stray BOM or blank line before the XML declaration.
+            text = source.read_text(encoding="utf-8").lstrip("\ufeff \t\r\n")
+            try:
+                xml.dom.minidom.parseString(text.encode("utf-8"))
+            except Exception as error:
+                fail(f"{source} is not valid XML: {error}")
+            destination.write_text(text, encoding="utf-8")
+        else:
+            destination.write_bytes(source.read_bytes())
+        count += 1
     print(f"copied {count} branding resources")
+
+
+def write_launch_background() -> None:
+    """Plain dark launch screen (no logo), generated so it is always valid."""
+    for folder in ("drawable", "drawable-v21"):
+        path = APP / "src" / "main" / "res" / folder / "launch_background.xml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(LAUNCH_BACKGROUND, encoding="utf-8")
+    print("wrote launch_background.xml")
 
 
 def patch_manifest() -> None:
@@ -129,31 +155,11 @@ def patch_activity() -> None:
     print("patched MainActivity")
 
 
-def set_kotlin_mode(builtin: bool) -> None:
-    path = ROOT / "android" / "gradle.properties"
-    value = "true" if builtin else "false"
-    lines = path.read_text().splitlines() if path.exists() else []
-    wanted = {"android.builtInKotlin": value, "android.newDsl": value}
-    out = []
-    for line in lines:
-        key = line.split("=", 1)[0].strip()
-        if key in wanted:
-            line = f"{key}={wanted.pop(key)}"
-        out.append(line)
-    out.extend(f"{key}={val}" for key, val in wanted.items())
-    path.write_text("\n".join(out) + "\n")
-    print(f"gradle.properties: builtInKotlin/newDsl = {value}")
-
-
 if __name__ == "__main__":
     if not APP.is_dir():
         fail("android/ not found; run `flutter create` first")
-    if "--builtin-kotlin" in sys.argv:
-        set_kotlin_mode(True)
-    elif "--legacy-kotlin" in sys.argv:
-        set_kotlin_mode(False)
-    else:
-        copy_resources()
-        patch_manifest()
-        patch_gradle()
-        patch_activity()
+    copy_resources()
+    write_launch_background()
+    patch_manifest()
+    patch_gradle()
+    patch_activity()
