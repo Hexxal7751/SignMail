@@ -1,4 +1,4 @@
-name: SignMail
+name: signmail
 description: A mobile-first email client with first-class S/MIME signing.
 publish_to: 'none'
 version: 0.1.0+1
