@@ -15,8 +15,8 @@ class GmailAuthService {
 
   // Google Cloud Console > Google Auth Platform > Clients
   // Select the WEB application client, NOT the Android client.
-  static const String _webClientId =
-      '294956053372-9h12bhshrn9sertq2he2pi1tq8dfrgpb.apps.googleusercontent.com';
+  static const _webClientId =
+    '294956053372-golg2d9tunff4v8smk19fdfct3k4at4l.apps.googleusercontent.com';
 
   static const String gmailScope = 'https://mail.google.com/';
 
