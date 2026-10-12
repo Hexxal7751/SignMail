@@ -8,6 +8,10 @@ Run from anywhere after `flutter create`. It:
   * switches MainActivity to FlutterFragmentActivity (needed by local_auth)
 
 Every step is safe to run twice.
+
+Options:
+  --builtin-kotlin   switch the project to Android's built-in Kotlin support
+  --legacy-kotlin    switch back to the Flutter template defaults
 """
 import pathlib
 import re
@@ -125,10 +129,31 @@ def patch_activity() -> None:
     print("patched MainActivity")
 
 
+def set_kotlin_mode(builtin: bool) -> None:
+    path = ROOT / "android" / "gradle.properties"
+    value = "true" if builtin else "false"
+    lines = path.read_text().splitlines() if path.exists() else []
+    wanted = {"android.builtInKotlin": value, "android.newDsl": value}
+    out = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if key in wanted:
+            line = f"{key}={wanted.pop(key)}"
+        out.append(line)
+    out.extend(f"{key}={val}" for key, val in wanted.items())
+    path.write_text("\n".join(out) + "\n")
+    print(f"gradle.properties: builtInKotlin/newDsl = {value}")
+
+
 if __name__ == "__main__":
     if not APP.is_dir():
         fail("android/ not found; run `flutter create` first")
-    copy_resources()
-    patch_manifest()
-    patch_gradle()
-    patch_activity()
+    if "--builtin-kotlin" in sys.argv:
+        set_kotlin_mode(True)
+    elif "--legacy-kotlin" in sys.argv:
+        set_kotlin_mode(False)
+    else:
+        copy_resources()
+        patch_manifest()
+        patch_gradle()
+        patch_activity()
