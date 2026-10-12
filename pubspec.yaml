@@ -1,10 +1,10 @@
-name: signmail
+name: SignMail
 description: A mobile-first email client with first-class S/MIME signing.
 publish_to: 'none'
 version: 0.1.0+1
 
 environment:
-  sdk: '>=3.6.0 <4.0.0'
+  sdk: '>=3.10.0 <4.0.0'
 
 dependencies:
   flutter:
@@ -17,6 +17,9 @@ dependencies:
   path_provider: ^2.1.5
   flutter_riverpod: ^2.6.1
   google_sign_in: ^7.2.0
+  google_sign_in_platform_interface: ^3.1.0
+  flutter_local_notifications: ^22.3.1
+  workmanager: ^0.10.10
 
 dev_dependencies:
   flutter_test:

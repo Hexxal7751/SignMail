@@ -1,5 +1,6 @@
 import 'dart:async' show TimeoutException;
 import 'dart:io' show SocketException, TlsException;
+import 'dart:typed_data' show Uint8List;
 
 import 'package:enough_mail/enough_mail.dart';
 
@@ -98,6 +99,11 @@ class MailBody {
     required this.toLine,
     required this.attachmentNames,
     required this.wasHtmlOnly,
+    this.messageId,
+    this.references,
+    this.replyToEmail,
+    this.toEmails = const <String>[],
+    this.ccEmails = const <String>[],
   });
 
   final String text;
@@ -106,6 +112,46 @@ class MailBody {
 
   /// True when the message had no plain-text version and was converted.
   final bool wasHtmlOnly;
+
+  /// Header values needed to reply in the same conversation.
+  final String? messageId;
+  final String? references;
+  final String? replyToEmail;
+  final List<String> toEmails;
+  final List<String> ccEmails;
+}
+
+/// A file attached to an outgoing message.
+class OutgoingAttachment {
+  const OutgoingAttachment({required this.name, required this.bytes});
+
+  final String name;
+  final Uint8List bytes;
+}
+
+/// A message to be sent.
+class OutgoingMail {
+  const OutgoingMail({
+    required this.to,
+    required this.subject,
+    required this.body,
+    this.cc = const <String>[],
+    this.bcc = const <String>[],
+    this.attachments = const <OutgoingAttachment>[],
+    this.inReplyTo,
+    this.references,
+    this.fromName,
+  });
+
+  final List<String> to;
+  final List<String> cc;
+  final List<String> bcc;
+  final String subject;
+  final String body;
+  final List<OutgoingAttachment> attachments;
+  final String? inReplyTo;
+  final String? references;
+  final String? fromName;
 }
 
 /// A mail problem that can be shown to the user as is.
@@ -126,12 +172,17 @@ class MailServiceException implements Exception {
 /// Each call opens a short-lived secure connection. A long-lived connection
 /// for live updates comes with the sync work.
 class MailService {
-  MailService(this._auth);
+  MailService(this._auth, {this.background = false});
 
   final GmailAuthService _auth;
 
+  /// True when running without a screen (background mail check).
+  final bool background;
+
   static const String _host = 'imap.gmail.com';
   static const int _port = 993;
+  static const String _smtpHost = 'smtp.gmail.com';
+  static const int _smtpPort = 465;
 
   /// The newest [count] messages of the inbox, newest first.
   Future<List<MailSummary>> fetchInbox({int count = 40}) {
@@ -157,8 +208,8 @@ class MailService {
     });
   }
 
-  /// Downloads one message and marks it as read.
-  Future<MailBody> fetchBody(int uid) {
+  /// Downloads one message, and marks it as read when [markSeen] is set.
+  Future<MailBody> fetchBody(int uid, {bool markSeen = true}) {
     return _withInbox<MailBody>((client, inbox) async {
       final result = await client.uidFetchMessage(
         uid,
@@ -185,14 +236,27 @@ class MailService {
         // Attachment names are optional; the message can still be read.
       }
 
-      try {
-        // Opening a message marks it as read, like other mail apps.
-        await client.uidMarkSeen(MessageSequence.fromId(uid, isUid: true));
-      } catch (_) {
-        // Not critical; the message simply stays unread on the server.
+      if (markSeen) {
+        try {
+          // Opening a message marks it as read, like other mail apps.
+          await client.uidMarkSeen(MessageSequence.fromId(uid, isUid: true));
+        } catch (_) {
+          // Not critical; the message simply stays unread on the server.
+        }
       }
 
       final recipients = message.to ?? const <MailAddress>[];
+      final copies = message.cc ?? const <MailAddress>[];
+
+      String? replyTo;
+      try {
+        final addresses = message.decodeHeaderMailAddressValue('reply-to');
+        if (addresses != null && addresses.isNotEmpty) {
+          replyTo = addresses.first.email;
+        }
+      } catch (_) {
+        // Fall back to the sender when replying.
+      }
 
       return MailBody(
         text: plain.isNotEmpty
@@ -201,13 +265,110 @@ class MailService {
         toLine: recipients.map(_labelOf).join(', '),
         attachmentNames: attachments,
         wasHtmlOnly: plain.isEmpty && html.isNotEmpty,
+        messageId: message.getHeaderValue('message-id')?.trim(),
+        references: message.getHeaderValue('references')?.trim(),
+        replyToEmail: replyTo,
+        toEmails: recipients.map((a) => a.email).toList(),
+        ccEmails: copies.map((a) => a.email).toList(),
       );
     });
   }
 
+  /// Sends a message through Gmail (SMTP). Gmail files the copy in
+  /// "Sent" by itself.
+  Future<void> sendMail(OutgoingMail mail) async {
+    final email = await _auth.savedEmail();
+    if (email == null) {
+      throw const MailServiceException(
+        'No account is connected yet.',
+        needsReconnect: true,
+      );
+    }
+
+    final token = await _token();
+    final name = mail.fromName?.trim();
+
+    final builder = MessageBuilder(
+      text: mail.body,
+      characterSet: CharacterSet.utf8,
+    )
+      ..from = <MailAddress>[
+        MailAddress(name == null || name.isEmpty ? null : name, email),
+      ]
+      ..to = <MailAddress>[for (final a in mail.to) MailAddress(null, a)]
+      ..subject = mail.subject;
+
+    if (mail.cc.isNotEmpty) {
+      builder.cc = <MailAddress>[for (final a in mail.cc) MailAddress(null, a)];
+    }
+    if (mail.bcc.isNotEmpty) {
+      builder.bcc = <MailAddress>[
+        for (final a in mail.bcc) MailAddress(null, a),
+      ];
+    }
+    if (mail.inReplyTo != null && mail.inReplyTo!.isNotEmpty) {
+      builder.setHeader('In-Reply-To', mail.inReplyTo);
+    }
+    if (mail.references != null && mail.references!.isNotEmpty) {
+      builder.setHeader('References', mail.references);
+    }
+    for (final file in mail.attachments) {
+      builder.addBinary(
+        file.bytes,
+        MediaType.guessFromFileName(file.name),
+        filename: file.name,
+      );
+    }
+
+    final message = builder.buildMimeMessage();
+    final client = SmtpClient('signmail.app');
+
+    try {
+      await client.connectToServer(_smtpHost, _smtpPort, isSecure: true);
+      await client.ehlo();
+      await client.authenticate(email, token, AuthMechanism.xoauth2);
+      await client.sendMessage(message);
+    } on MailServiceException {
+      rethrow;
+    } on SmtpException catch (error) {
+      final details = '${error.message}'.toLowerCase();
+      final looksLikeLogin = details.contains('authenticat') ||
+          details.contains('credentials') ||
+          details.contains('xoauth');
+      throw MailServiceException(
+        'Gmail did not accept the message: '
+        '${error.message ?? 'unknown error'}',
+        needsReconnect: looksLikeLogin,
+      );
+    } on SocketException {
+      throw const MailServiceException(
+        'No connection to Gmail. Check your internet and try again.',
+      );
+    } on TimeoutException {
+      throw const MailServiceException('Gmail took too long to respond.');
+    } on TlsException {
+      throw const MailServiceException(
+        'The secure connection to Gmail failed.',
+      );
+    } catch (error) {
+      throw MailServiceException('Could not send the message: $error');
+    } finally {
+      try {
+        await client.quit();
+      } catch (_) {
+        // The connection is being discarded anyway.
+      }
+      try {
+        await client.disconnect();
+      } catch (_) {
+        // Already closed.
+      }
+    }
+  }
+
   Future<String> _token() async {
     try {
-      return await _auth.accessToken();
+      return await _auth.accessToken(background: background);
     } on GmailAuthException catch (error) {
       throw MailServiceException(error.message, needsReconnect: true);
     }

@@ -17,12 +17,17 @@ class InboxView extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final inbox = ref.watch(inboxProvider);
+    final settings = ref.watch(settingsProvider);
 
     return RefreshIndicator(
       color: _mint,
       onRefresh: () => ref.read(inboxProvider.notifier).refresh(),
       child: inbox.when(
-        data: (messages) => _MessageList(messages: messages),
+        data: (messages) => _MessageList(
+          messages: messages,
+          compact: settings.compactList,
+          showAvatars: settings.showAvatars,
+        ),
         loading: () => const _ScrollableCenter(
           child: CircularProgressIndicator(color: _mint),
         ),
@@ -50,9 +55,15 @@ class _ScrollableCenter extends StatelessWidget {
 }
 
 class _MessageList extends StatelessWidget {
-  const _MessageList({required this.messages});
+  const _MessageList({
+    required this.messages,
+    required this.compact,
+    required this.showAvatars,
+  });
 
   final List<MailSummary> messages;
+  final bool compact;
+  final bool showAvatars;
 
   @override
   Widget build(BuildContext context) {
@@ -83,16 +94,27 @@ class _MessageList extends StatelessWidget {
         if (messages.isEmpty)
           const _EmptyInbox()
         else
-          for (final message in messages) _MailTile(message: message),
+          for (final message in messages)
+            _MailTile(
+              message: message,
+              compact: compact,
+              showAvatars: showAvatars,
+            ),
       ],
     );
   }
 }
 
 class _MailTile extends StatelessWidget {
-  const _MailTile({required this.message});
+  const _MailTile({
+    required this.message,
+    required this.compact,
+    required this.showAvatars,
+  });
 
   final MailSummary message;
+  final bool compact;
+  final bool showAvatars;
 
   @override
   Widget build(BuildContext context) {
@@ -100,7 +122,7 @@ class _MailTile extends StatelessWidget {
     final weight = unread ? FontWeight.w800 : FontWeight.w500;
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: EdgeInsets.only(bottom: compact ? 4 : 8),
       child: Material(
         color: _card,
         borderRadius: BorderRadius.circular(18),
@@ -114,7 +136,7 @@ class _MailTile extends StatelessWidget {
             );
           },
           child: Container(
-            padding: const EdgeInsets.all(14),
+            padding: EdgeInsets.all(compact ? 9 : 14),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(18),
               border: Border.all(
@@ -124,8 +146,13 @@ class _MailTile extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                SenderAvatar(label: message.senderName),
-                const SizedBox(width: 12),
+                if (showAvatars) ...[
+                  SenderAvatar(
+                    label: message.senderName,
+                    size: compact ? 34 : 42,
+                  ),
+                  const SizedBox(width: 12),
+                ],
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -157,7 +184,7 @@ class _MailTile extends StatelessWidget {
                       const SizedBox(height: 4),
                       Text(
                         message.subject,
-                        maxLines: 2,
+                        maxLines: compact ? 1 : 2,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: unread

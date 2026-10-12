@@ -35,6 +35,9 @@ jobs:
           flutter create --platforms=android --org net.hexxal.signmail .
           rm -f test/widget_test.dart
 
+      - name: Apply SignMail Android setup (icons, permissions, desugaring)
+        run: python3 tools/patch_android.py
+
       - name: Restore persistent debug keystore
         id: debug-keystore-cache
         uses: actions/cache@v4
@@ -98,4 +101,3 @@ jobs:
           path: build/app/outputs/flutter-apk/app-debug.apk
           if-no-files-found: error
           retention-days: 7
-          

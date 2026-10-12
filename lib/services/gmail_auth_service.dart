@@ -1,5 +1,6 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:google_sign_in_platform_interface/google_sign_in_platform_interface.dart';
 
 /// Handles Google account sign-in and Gmail authorization.
 ///
@@ -15,8 +16,8 @@ class GmailAuthService {
 
   // Google Cloud Console > Google Auth Platform > Clients
   // Select the WEB application client, NOT the Android client.
-  static const _webClientId =
-    '294956053372-golg2d9tunff4v8smk19fdfct3k4at4l.apps.googleusercontent.com';
+  static const String _webClientId =
+      '294956053372-golg2d9tunff4v8smk19fdfct3k4at4l.apps.googleusercontent.com';
 
   static const String gmailScope = 'https://mail.google.com/';
 
@@ -77,23 +78,70 @@ class GmailAuthService {
 
   /// Returns a fresh Gmail access token without showing any screen.
   ///
+  /// With [background] set, no Activity is needed, so this also works while
+  /// the app is closed (used by the background mail check).
+  ///
   /// Throws [GmailAuthException] when Google needs the user to sign in or
   /// approve access again.
-  Future<String> accessToken() async {
+  Future<String> accessToken({bool background = false}) async {
     await initialize();
 
-    final GoogleSignInAccount account = await _restoreAccount();
+    if (background) {
+      return _silentToken();
+    }
+
+    final GoogleSignInAccount account;
+    try {
+      account = await _restoreAccount();
+    } on GmailAuthException {
+      // Restoring needs the screen; the silent path may still succeed.
+      return _silentToken();
+    }
 
     final GoogleSignInClientAuthorization? authorization =
         await account.authorizationClient.authorizationForScopes(_scopes);
 
     if (authorization == null) {
-      throw const GmailAuthException(
-        'Google needs you to approve Gmail access again.',
-      );
+      return _silentToken();
     }
 
     return authorization.accessToken;
+  }
+
+  /// Asks Android for a token for the remembered account. This never shows
+  /// any screen and does not need an Activity.
+  Future<String> _silentToken() async {
+    final String? email = await savedEmail();
+    if (email == null) {
+      throw const GmailAuthException('Please reconnect your Google account.');
+    }
+
+    try {
+      final ClientAuthorizationTokenData? tokens =
+          await GoogleSignInPlatform.instance
+              .clientAuthorizationTokensForScopes(
+        ClientAuthorizationTokensForScopesParameters(
+          request: AuthorizationRequestDetails(
+            scopes: _scopes,
+            userId: null,
+            email: email,
+            promptIfUnauthorized: false,
+          ),
+        ),
+      );
+
+      if (tokens == null) {
+        throw const GmailAuthException(
+          'Google needs you to approve Gmail access again.',
+        );
+      }
+
+      return tokens.accessToken;
+    } on GoogleSignInException catch (error) {
+      throw GmailAuthException(
+        'Google sign-in could not be restored (${error.code.name}).',
+      );
+    }
   }
 
   Future<GoogleSignInAccount> _restoreAccount() async {

@@ -1,22 +1,48 @@
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'providers.dart';
+import 'screens/app_lock_gate.dart';
+import 'screens/compose_screen.dart';
 import 'screens/inbox_view.dart';
+import 'screens/settings_view.dart';
+import 'services/app_settings.dart';
+import 'services/background_sync.dart';
 import 'services/gmail_auth_service.dart';
+import 'services/new_mail_checker.dart';
+import 'services/notification_service.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const ProviderScope(child: SignMailApp()));
+
+  final settings = await const SettingsStore().load();
+
+  try {
+    await NotificationService.instance.init();
+    await BackgroundSync.initialize();
+  } catch (_) {
+    // The app works without notifications.
+  }
+
+  runApp(
+    ProviderScope(
+      overrides: [initialSettingsProvider.overrideWithValue(settings)],
+      child: const SignMailApp(),
+    ),
+  );
 }
 
-class SignMailApp extends StatelessWidget {
+class SignMailApp extends ConsumerWidget {
   const SignMailApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     const seed = Color(0xFF69E0D0);
+    final scalePercent = ref.watch(
+      settingsProvider.select((settings) => settings.textScalePercent),
+    );
 
     return MaterialApp(
       title: 'SignMail',
@@ -54,6 +80,17 @@ class SignMailApp extends StatelessWidget {
           ),
         ),
       ),
+      builder: (context, child) {
+        final media = MediaQuery.of(context);
+        return MediaQuery(
+          data: scalePercent == 100
+              ? media
+              : media.copyWith(
+                  textScaler: TextScaler.linear(scalePercent / 100),
+                ),
+          child: AppLockGate(child: child ?? const SizedBox.shrink()),
+        );
+      },
       home: const StartupGate(),
     );
   }
@@ -628,27 +665,110 @@ class PrototypeHomeScreen extends ConsumerStatefulWidget {
       _PrototypeHomeScreenState();
 }
 
-class _PrototypeHomeScreenState extends ConsumerState<PrototypeHomeScreen> {
+class _PrototypeHomeScreenState extends ConsumerState<PrototypeHomeScreen>
+    with WidgetsBindingObserver {
   int _index = 0;
+  Timer? _timer;
+  bool _inForeground = true;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _scheduleTimer(ref.read(settingsProvider).autoRefreshSeconds);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _startup());
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _startup() async {
+    final settings = ref.read(settingsProvider);
+
+    try {
+      if (settings.notificationsEnabled) {
+        await NotificationService.instance.requestPermission();
+      }
+      await BackgroundSync.apply(settings, signedIn: true);
+      await NotificationService.instance.clearMailNotification();
+    } catch (_) {
+      // Notifications are optional.
+    }
+  }
+
+  void _scheduleTimer(int seconds) {
+    _timer?.cancel();
+    _timer = null;
+
+    if (seconds <= 0) {
+      return;
+    }
+
+    _timer = Timer.periodic(Duration(seconds: seconds), (_) {
+      if (_inForeground && mounted) {
+        ref.read(inboxProvider.notifier).refresh();
+      }
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _inForeground = state == AppLifecycleState.resumed;
+
+    if (_inForeground) {
+      ref.read(inboxProvider.notifier).refresh();
+      NotificationService.instance.clearMailNotification();
+    }
+  }
 
   Future<void> _signOut() async {
     final navigator = Navigator.of(context);
+    final settings = ref.read(settingsProvider);
+
     await ref.read(authServiceProvider).disconnect();
+    await BackgroundSync.apply(settings, signedIn: false);
+    await const NewMailChecker().reset();
+    await NotificationService.instance.clearMailNotification();
+
     ref
       ..invalidate(inboxProvider)
       ..invalidate(savedEmailProvider);
+
     navigator.pushAndRemoveUntil(
       MaterialPageRoute<void>(builder: (_) => const WelcomeScreen()),
       (route) => false,
     );
   }
 
+  Future<void> _compose() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final sent = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        fullscreenDialog: true,
+        builder: (_) => const ComposeScreen(),
+      ),
+    );
+
+    if (sent == true) {
+      messenger.showSnackBar(const SnackBar(content: Text('Message sent')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    ref.listen<int>(
+      settingsProvider.select((settings) => settings.autoRefreshSeconds),
+      (previous, next) => _scheduleTimer(next),
+    );
+
     final pages = [
       const InboxView(),
       const CertificateScreen(),
-      const SettingsScreen(),
+      SettingsView(onSignOut: _signOut),
     ];
 
     return Scaffold(
@@ -672,33 +792,12 @@ class _PrototypeHomeScreenState extends ConsumerState<PrototypeHomeScreen> {
             onPressed: () => ref.read(inboxProvider.notifier).refresh(),
             icon: const Icon(Icons.sync_rounded),
           ),
-          PopupMenuButton<String>(
-            onSelected: (value) {
-              if (value == 'signout') {
-                _signOut();
-              }
-            },
-            itemBuilder: (context) => const [
-              PopupMenuItem<String>(
-                value: 'signout',
-                child: Text('Sign out'),
-              ),
-            ],
-          ),
         ],
       ),
       body: pages[_index],
       floatingActionButton: _index == 0
           ? FloatingActionButton.extended(
-              onPressed: () {
-                showModalBottomSheet<void>(
-                  context: context,
-                  showDragHandle: true,
-                  isScrollControlled: true,
-                  backgroundColor: const Color(0xFF111923),
-                  builder: (_) => const ComposeSheet(),
-                );
-              },
+              onPressed: _compose,
               backgroundColor: const Color(0xFF69E0D0),
               foregroundColor: const Color(0xFF071311),
               icon: const Icon(Icons.edit_rounded),
@@ -774,152 +873,6 @@ class CertificateScreen extends StatelessWidget {
               'signing succeeds.',
         ),
       ],
-    );
-  }
-}
-
-class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
-        const Text(
-          'Settings',
-          style: TextStyle(
-            fontSize: 29,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.7,
-          ),
-        ),
-        const SizedBox(height: 20),
-        const SettingsTile(
-          icon: Icons.account_circle_outlined,
-          title: 'Email accounts',
-          subtitle: 'Provider connections and sync',
-        ),
-        const SettingsTile(
-          icon: Icons.verified_user_outlined,
-          title: 'Signing defaults',
-          subtitle: 'Require S/MIME signing when available',
-        ),
-        const SettingsTile(
-          icon: Icons.fingerprint_rounded,
-          title: 'App lock',
-          subtitle: 'Biometrics and device security',
-        ),
-        const SettingsTile(
-          icon: Icons.info_outline_rounded,
-          title: 'About SignMail',
-          subtitle: 'Mobile-first S/MIME email',
-        ),
-        const SizedBox(height: 20),
-        const Text(
-          'Prototype only: account sync, secure import, signing and sending '
-          'are not implemented yet.',
-          style: TextStyle(
-            color: Color(0xFF8F9EAE),
-            height: 1.5,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class ComposeSheet extends StatefulWidget {
-  const ComposeSheet({super.key});
-
-  @override
-  State<ComposeSheet> createState() => _ComposeSheetState();
-}
-
-class _ComposeSheetState extends State<ComposeSheet> {
-  bool _sign = true;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        20,
-        10,
-        20,
-        MediaQuery.of(context).viewInsets.bottom + 22,
-      ),
-      child: ListView(
-        shrinkWrap: true,
-        children: [
-          const Text(
-            'New message',
-            style: TextStyle(
-              fontSize: 25,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(height: 18),
-          const TextField(
-            decoration: InputDecoration(
-              labelText: 'To',
-              hintText: 'recipient@example.com',
-            ),
-          ),
-          const SizedBox(height: 10),
-          const TextField(
-            decoration: InputDecoration(
-              labelText: 'Subject',
-              hintText: 'Subject',
-            ),
-          ),
-          const SizedBox(height: 10),
-          const TextField(
-            minLines: 5,
-            maxLines: 8,
-            decoration: InputDecoration(
-              labelText: 'Message',
-              hintText: 'Write something thoughtful…',
-            ),
-          ),
-          const SizedBox(height: 14),
-          SwitchListTile(
-            value: _sign,
-            onChanged: (value) => setState(() => _sign = value),
-            contentPadding: EdgeInsets.zero,
-            activeThumbColor: const Color(0xFF69E0D0),
-            title: const Text('Request S/MIME signing'),
-            subtitle: const Text(
-              'Actual signing is not yet connected',
-              style: TextStyle(
-                color: Color(0xFF8F9EAE),
-                fontSize: 12,
-              ),
-            ),
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            height: 52,
-            child: FilledButton.icon(
-              onPressed: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text(
-                      'Sending is disabled until SMTP and S/MIME signing '
-                      'are implemented.',
-                    ),
-                  ),
-                );
-              },
-              icon: const Icon(Icons.send_rounded),
-              label: const Text('Send message'),
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFF69E0D0),
-                foregroundColor: const Color(0xFF071311),
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

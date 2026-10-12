@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers.dart';
 import '../services/mail_service.dart';
+import 'compose_screen.dart';
 
 const Color _mint = Color(0xFF69E0D0);
 const Color _muted = Color(0xFF8F9EAE);
@@ -13,13 +14,36 @@ class MessageScreen extends ConsumerWidget {
 
   final MailSummary summary;
 
+  Future<void> _write(
+    BuildContext context,
+    WidgetRef ref,
+    ComposeSeed Function(String? myEmail) seed,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final me = await ref.read(authServiceProvider).savedEmail();
+    if (!context.mounted) {
+      return;
+    }
+
+    final sent = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        fullscreenDialog: true,
+        builder: (_) => ComposeScreen(seed: seed(me)),
+      ),
+    );
+
+    if (sent == true) {
+      messenger.showSnackBar(const SnackBar(content: Text('Message sent')));
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final provider = messageBodyProvider(summary.uid);
     final body = ref.watch(provider);
 
     ref.listen<AsyncValue<MailBody>>(provider, (previous, next) {
-      if (next.hasValue) {
+      if (next.hasValue && ref.read(settingsProvider).markReadOnOpen) {
         ref.read(inboxProvider.notifier).markSeenLocally(summary.uid);
       }
     });
@@ -35,6 +59,37 @@ class MessageScreen extends ConsumerWidget {
           style: TextStyle(fontWeight: FontWeight.w700),
         ),
       ),
+      bottomNavigationBar: body.valueOrNull == null
+          ? null
+          : _ActionBar(
+              onReply: () => _write(
+                context,
+                ref,
+                (me) => ComposeSeed.reply(
+                  summary: summary,
+                  body: body.requireValue,
+                  myEmail: me,
+                ),
+              ),
+              onReplyAll: () => _write(
+                context,
+                ref,
+                (me) => ComposeSeed.reply(
+                  summary: summary,
+                  body: body.requireValue,
+                  myEmail: me,
+                  replyAll: true,
+                ),
+              ),
+              onForward: () => _write(
+                context,
+                ref,
+                (me) => ComposeSeed.forward(
+                  summary: summary,
+                  body: body.requireValue,
+                ),
+              ),
+            ),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
@@ -259,6 +314,60 @@ class _BodyError extends StatelessWidget {
         const SizedBox(height: 14),
         OutlinedButton(onPressed: onRetry, child: const Text('Try again')),
       ],
+    );
+  }
+}
+
+class _ActionBar extends StatelessWidget {
+  const _ActionBar({
+    required this.onReply,
+    required this.onReplyAll,
+    required this.onForward,
+  });
+
+  final VoidCallback onReply;
+  final VoidCallback onReplyAll;
+  final VoidCallback onForward;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xFF101720),
+        border: Border(top: BorderSide(color: Color(0xFF263342))),
+      ),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: onReply,
+                  icon: const Icon(Icons.reply_rounded),
+                  label: const Text('Reply'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: _mint,
+                    foregroundColor: const Color(0xFF071311),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.outlined(
+                tooltip: 'Reply all',
+                onPressed: onReplyAll,
+                icon: const Icon(Icons.reply_all_rounded),
+              ),
+              const SizedBox(width: 4),
+              IconButton.outlined(
+                tooltip: 'Forward',
+                onPressed: onForward,
+                icon: const Icon(Icons.forward_rounded),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
