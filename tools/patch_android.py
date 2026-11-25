@@ -6,6 +6,8 @@ Run from anywhere after `flutter create`. It:
   * adds the permissions the app needs and names the app "SignMail"
   * enables core-library desugaring (needed by flutter_local_notifications)
   * switches MainActivity to FlutterFragmentActivity (needed by local_auth)
+  * signs debug builds with the key named by $SIGNMAIL_KEYSTORE, so every
+    build has the same signature and installs over the previous one
 
 Every step is safe to run twice.
 """
@@ -38,6 +40,40 @@ LAUNCH_BACKGROUND = """<?xml version="1.0" encoding="utf-8"?>
         </shape>
     </item>
 </layer-list>
+"""
+
+SIGNING_KTS = """
+// SignMail: sign with the key from $SIGNMAIL_KEYSTORE (stable signature).
+android {
+    signingConfigs {
+        getByName("debug") {
+            val keystorePath = System.getenv("SIGNMAIL_KEYSTORE")
+            if (keystorePath != null && file(keystorePath).exists()) {
+                storeFile = file(keystorePath)
+                storePassword = "android"
+                keyAlias = "AndroidDebugKey"
+                keyPassword = "android"
+            }
+        }
+    }
+}
+"""
+
+SIGNING_GROOVY = """
+// SignMail: sign with the key from $SIGNMAIL_KEYSTORE (stable signature).
+android {
+    signingConfigs {
+        debug {
+            def keystorePath = System.getenv("SIGNMAIL_KEYSTORE")
+            if (keystorePath != null && file(keystorePath).exists()) {
+                storeFile file(keystorePath)
+                storePassword "android"
+                keyAlias "AndroidDebugKey"
+                keyPassword "android"
+            }
+        }
+    }
+}
 """
 
 
@@ -140,6 +176,23 @@ def patch_gradle() -> None:
     print("patched app Gradle file")
 
 
+def patch_signing() -> None:
+    kts = APP / "build.gradle.kts"
+    groovy = APP / "build.gradle"
+
+    if kts.exists():
+        text = kts.read_text()
+        if "SIGNMAIL_KEYSTORE" not in text:
+            kts.write_text(text + SIGNING_KTS)
+    elif groovy.exists():
+        text = groovy.read_text()
+        if "SIGNMAIL_KEYSTORE" not in text:
+            groovy.write_text(text + SIGNING_GROOVY)
+    else:
+        fail("no app/build.gradle(.kts) found")
+    print("patched signing config")
+
+
 def patch_activity() -> None:
     files = list((APP / "src" / "main").rglob("MainActivity.*"))
     if not files:
@@ -162,4 +215,5 @@ if __name__ == "__main__":
     write_launch_background()
     patch_manifest()
     patch_gradle()
+    patch_signing()
     patch_activity()

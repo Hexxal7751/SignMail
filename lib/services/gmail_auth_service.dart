@@ -3,13 +3,16 @@ import 'dart:io' show Platform;
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:google_sign_in_platform_interface/google_sign_in_platform_interface.dart';
 
+import 'desktop_google_auth.dart';
 import 'local_store.dart';
 
 /// Handles Google account sign-in and Gmail authorization.
 ///
-/// One shared instance is used across the app, so the connected account is
-/// remembered between screens. Gmail access tokens are short-lived, so a fresh
-/// one is requested (silently) every time mail is accessed.
+/// Phones use Google Sign-In. Windows and Linux use a browser-based sign-in
+/// ([DesktopGoogleAuth]). One shared instance is used across the app, so the
+/// connected account is remembered between screens. Gmail access tokens are
+/// short-lived, so a fresh one is requested (silently) every time mail is
+/// accessed.
 class GmailAuthService {
   factory GmailAuthService() => _instance;
 
@@ -30,15 +33,11 @@ class GmailAuthService {
 
   static const String _emailKey = 'signmail.account.email';
 
-  /// Google Sign-In only exists on phones. Windows and Linux need their own
-  /// browser-based sign-in, which is a later step.
-  static bool get isSupported => Platform.isAndroid || Platform.isIOS;
-
-  static const String _unsupportedMessage =
-      'Google sign-in is not available on Windows and Linux yet. '
-      'Use the Android app for now.';
+  static bool get _isDesktop =>
+      Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 
   final GoogleSignIn _googleSignIn = GoogleSignIn.instance;
+  final DesktopGoogleAuth _desktop = DesktopGoogleAuth();
   final LocalStore _store = const LocalStore();
 
   bool _initialized = false;
@@ -64,12 +63,12 @@ class GmailAuthService {
     return stored;
   }
 
-  /// Like [savedEmail], but when nothing is saved it asks Google (without
-  /// showing any screen) whether this device already has an authorized
-  /// account, so the user does not have to onboard again.
+  /// Like [savedEmail], but on phones, when nothing is saved, it asks Google
+  /// (without showing any screen) whether this device already has an
+  /// authorized account, so the user does not have to onboard again.
   Future<String?> restoreSession() async {
     final existing = await savedEmail();
-    if (existing != null || !isSupported) {
+    if (existing != null || _isDesktop) {
       return existing;
     }
 
@@ -97,24 +96,45 @@ class GmailAuthService {
   /// The connected address is remembered so the next app start can skip
   /// the welcome flow.
   Future<GmailAuthorization> connectGmail() async {
-    if (!isSupported) {
-      throw const GmailAuthException(_unsupportedMessage);
+    if (_isDesktop) {
+      try {
+        final result = await _desktop.signIn(loginHint: await savedEmail());
+        await _store.write(key: _emailKey, value: result.email);
+        return GmailAuthorization(
+          email: result.email,
+          accessToken: result.accessToken,
+        );
+      } on DesktopAuthException catch (error) {
+        throw GmailAuthException(error.message);
+      }
     }
 
     await initialize();
 
-    final GoogleSignInAccount account = await _googleSignIn.authenticate();
+    try {
+      final GoogleSignInAccount account = await _googleSignIn.authenticate();
 
-    final GoogleSignInClientAuthorization authorization =
-        await account.authorizationClient.authorizeScopes(_scopes);
+      final GoogleSignInClientAuthorization authorization =
+          await account.authorizationClient.authorizeScopes(_scopes);
 
-    _account = account;
-    await _store.write(key: _emailKey, value: account.email);
+      _account = account;
+      await _store.write(key: _emailKey, value: account.email);
 
-    return GmailAuthorization(
-      email: account.email,
-      accessToken: authorization.accessToken,
-    );
+      return GmailAuthorization(
+        email: account.email,
+        accessToken: authorization.accessToken,
+      );
+    } on GoogleSignInException catch (error) {
+      if ('$error'.contains('[16]')) {
+        throw const GmailAuthException(
+          'Google refused the sign-in (error 16). If you did not cancel it, '
+          'the signing fingerprint (SHA-1) of this build is probably not '
+          'registered on the Android OAuth client in Google Cloud. Add the '
+          'SHA-1 shown in the build log, wait a few minutes, then try again.',
+        );
+      }
+      rethrow;
+    }
   }
 
   /// Returns a fresh Gmail access token without showing any screen.
@@ -125,8 +145,12 @@ class GmailAuthService {
   /// Throws [GmailAuthException] when Google needs the user to sign in or
   /// approve access again.
   Future<String> accessToken({bool background = false}) async {
-    if (!isSupported) {
-      throw const GmailAuthException(_unsupportedMessage);
+    if (_isDesktop) {
+      try {
+        return await _desktop.accessToken();
+      } on DesktopAuthException catch (error) {
+        throw GmailAuthException(error.message);
+      }
     }
 
     await initialize();
@@ -219,7 +243,8 @@ class GmailAuthService {
     _account = null;
     await _store.delete(key: _emailKey);
 
-    if (!isSupported) {
+    if (_isDesktop) {
+      await _desktop.clear();
       return;
     }
 

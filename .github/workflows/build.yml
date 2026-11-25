@@ -1,0 +1,247 @@
+name: SignMail Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      make_keystore:
+        description: "Only create a permanent Android signing key (printed once in the log)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Run this once by hand (tick the box) to create the permanent Android key.
+  keystore:
+    if: ${{ inputs.make_keystore }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create a permanent Android signing key
+        run: |
+          keytool -genkeypair \
+            -keystore signmail.keystore \
+            -storepass android \
+            -alias AndroidDebugKey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 36500 \
+            -dname "CN=SignMail,O=SignMail,C=US"
+
+          echo ""
+          echo "Copy everything between the two marker lines into a GitHub"
+          echo "secret named ANDROID_KEYSTORE_BASE64, then delete this run."
+          echo "-----BEGIN-----"
+          base64 -w0 signmail.keystore
+          echo ""
+          echo "-----END-----"
+
+  android:
+    if: ${{ !inputs.make_keystore }}
+    runs-on: ubuntu-24.04
+    env:
+      SIGNMAIL_KEYSTORE: /home/runner/.config/.android/debug.keystore
+      HAS_KEYSTORE_SECRET: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Android project files
+        run: |
+          flutter create --platforms=android --org net.hexxal.signmail .
+          rm -f test/widget_test.dart
+
+      - name: Apply SignMail Android setup (icons, permissions, signing)
+        run: python3 tools/patch_android.py
+
+      - name: Restore cached signing key (fallback when no secret is set)
+        uses: actions/cache@v5
+        with:
+          path: ~/.config/.android/debug.keystore
+          key: signmail-debug-keystore-v1
+
+      - name: Use the permanent signing key from the secret
+        if: ${{ env.HAS_KEYSTORE_SECRET == 'true' }}
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p "$(dirname "$SIGNMAIL_KEYSTORE")"
+          echo "$KEYSTORE_B64" | base64 -d > "$SIGNMAIL_KEYSTORE"
+          echo "Using the permanent key from ANDROID_KEYSTORE_BASE64."
+
+      - name: Create a key if none exists (fallback)
+        run: |
+          mkdir -p "$(dirname "$SIGNMAIL_KEYSTORE")"
+          if [ ! -f "$SIGNMAIL_KEYSTORE" ]; then
+            echo "::warning::No signing key found, creating a temporary one. Set the ANDROID_KEYSTORE_BASE64 secret so updates install over the old app."
+            keytool -genkeypair \
+              -keystore "$SIGNMAIL_KEYSTORE" \
+              -storepass android \
+              -alias AndroidDebugKey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Show Android OAuth setup details
+        run: |
+          echo "=== Android application ID (package name) ==="
+          grep -h 'applicationId' \
+            android/app/build.gradle \
+            android/app/build.gradle.kts 2>/dev/null || true
+
+          echo ""
+          echo "=== Signing key fingerprints (register the SHA-1 in Google Cloud) ==="
+          keytool -list -v \
+            -keystore "$SIGNMAIL_KEYSTORE" \
+            -storepass android \
+            -alias AndroidDebugKey |
+            grep -E 'SHA1:|SHA256:'
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze Dart code
+        run: flutter analyze --no-fatal-infos
+
+      - name: Build debug APK
+        run: flutter build apk --debug --build-number=${{ github.run_number }}
+
+      - name: Show the fingerprint the APK was really signed with
+        run: |
+          APKSIGNER="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
+          "$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-debug.apk |
+            grep -E 'SHA-(1|256) digest' || true
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v6
+        with:
+          name: SignMail-debug-APK
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  linux:
+    if: ${{ !inputs.make_keystore }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install Linux build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libsecret-1-dev libjsoncpp-dev
+
+      - name: Generate Linux project files
+        run: |
+          flutter config --enable-linux-desktop
+          flutter create --platforms=linux --org net.hexxal.signmail .
+          rm -f test/widget_test.dart
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze Dart code
+        run: flutter analyze --no-fatal-infos
+
+      - name: Build Linux release
+        env:
+          DESKTOP_CLIENT_ID: ${{ secrets.DESKTOP_CLIENT_ID }}
+          DESKTOP_CLIENT_SECRET: ${{ secrets.DESKTOP_CLIENT_SECRET }}
+        run: |
+          flutter build linux --release \
+            --build-number=${{ github.run_number }} \
+            --dart-define=DESKTOP_CLIENT_ID="$DESKTOP_CLIENT_ID" \
+            --dart-define=DESKTOP_CLIENT_SECRET="$DESKTOP_CLIENT_SECRET"
+
+      - name: Package
+        run: tar -czf SignMail-linux-x64.tar.gz -C build/linux/x64/release/bundle .
+
+      - name: Upload Linux build
+        uses: actions/upload-artifact@v6
+        with:
+          name: SignMail-linux-x64
+          path: SignMail-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    if: ${{ !inputs.make_keystore }}
+    runs-on: windows-latest
+    env:
+      # Newer Visual Studio rejects the old coroutine header used by the
+      # local_auth_windows plugin unless this is defined.
+      CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Windows project files
+        shell: bash
+        run: |
+          flutter config --enable-windows-desktop
+          flutter create --platforms=windows --org net.hexxal.signmail .
+          rm -f test/widget_test.dart
+          sed -i '/^project(/a add_definitions(-D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)' windows/CMakeLists.txt
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze Dart code
+        run: flutter analyze --no-fatal-infos
+
+      - name: Build Windows release
+        shell: bash
+        env:
+          DESKTOP_CLIENT_ID: ${{ secrets.DESKTOP_CLIENT_ID }}
+          DESKTOP_CLIENT_SECRET: ${{ secrets.DESKTOP_CLIENT_SECRET }}
+        run: |
+          flutter build windows --release \
+            --build-number=${{ github.run_number }} \
+            --dart-define=DESKTOP_CLIENT_ID="$DESKTOP_CLIENT_ID" \
+            --dart-define=DESKTOP_CLIENT_SECRET="$DESKTOP_CLIENT_SECRET"
+
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath SignMail-windows-x64.zip
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v6
+        with:
+          name: SignMail-windows-x64
+          path: SignMail-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 7
