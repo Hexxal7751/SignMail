@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'local_store.dart';
 
 import 'app_settings.dart';
 import 'gmail_auth_service.dart';
@@ -40,7 +40,7 @@ class SyncStatus {
 class NewMailChecker {
   const NewMailChecker();
 
-  static const FlutterSecureStorage _storage = FlutterSecureStorage();
+  static const LocalStore _storage = LocalStore();  
   static const String _lastUidKey = 'signmail.sync.lastUid';
   static const String _statusKey = 'signmail.sync.status';
 

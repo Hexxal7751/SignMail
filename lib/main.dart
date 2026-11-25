@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show PointerDeviceKind;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -47,8 +48,10 @@ class SignMailApp extends ConsumerWidget {
     return MaterialApp(
       title: 'SignMail',
       debugShowCheckedModeBanner: false,
+      scrollBehavior: const AppScrollBehavior(),
       theme: ThemeData(
         useMaterial3: true,
+        platform: TargetPlatform.android,
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF0A0F16),
         colorScheme: ColorScheme.fromSeed(
@@ -736,7 +739,11 @@ class _PrototypeHomeScreenState extends ConsumerState<PrototypeHomeScreen>
 
     ref
       ..invalidate(inboxProvider)
-      ..invalidate(savedEmailProvider);
+      ..invalidate(savedEmailProvider)
+      ..invalidate(foldersProvider)
+      ..invalidate(currentFolderProvider)
+      ..invalidate(searchQueryProvider)
+      ..invalidate(unreadOnlyProvider);
 
     navigator.pushAndRemoveUntil(
       MaterialPageRoute<void>(builder: (_) => const WelcomeScreen()),
@@ -771,6 +778,10 @@ class _PrototypeHomeScreenState extends ConsumerState<PrototypeHomeScreen>
       SettingsView(onSignOut: _signOut),
     ];
 
+    // Windows and Linux windows are wide: use a side rail instead of the
+    // bottom bar, so the app looks the same on every platform.
+    final wide = MediaQuery.sizeOf(context).width >= 840;
+
     return Scaffold(
       appBar: AppBar(
         title: const Row(
@@ -794,7 +805,39 @@ class _PrototypeHomeScreenState extends ConsumerState<PrototypeHomeScreen>
           ),
         ],
       ),
-      body: pages[_index],
+      drawer: _index == 0 ? const FolderDrawer() : null,
+      body: wide
+          ? Row(
+              children: [
+                NavigationRail(
+                  backgroundColor: const Color(0xFF101720),
+                  indicatorColor: const Color(0xFF21423F),
+                  selectedIndex: _index,
+                  labelType: NavigationRailLabelType.all,
+                  onDestinationSelected: (i) => setState(() => _index = i),
+                  destinations: const [
+                    NavigationRailDestination(
+                      icon: Icon(Icons.inbox_outlined),
+                      selectedIcon: Icon(Icons.inbox_rounded),
+                      label: Text('Inbox'),
+                    ),
+                    NavigationRailDestination(
+                      icon: Icon(Icons.verified_user_outlined),
+                      selectedIcon: Icon(Icons.verified_user_rounded),
+                      label: Text('Certificates'),
+                    ),
+                    NavigationRailDestination(
+                      icon: Icon(Icons.settings_outlined),
+                      selectedIcon: Icon(Icons.settings_rounded),
+                      label: Text('Settings'),
+                    ),
+                  ],
+                ),
+                const VerticalDivider(width: 1, color: Color(0xFF263342)),
+                Expanded(child: pages[_index]),
+              ],
+            )
+          : pages[_index],
       floatingActionButton: _index == 0
           ? FloatingActionButton.extended(
               onPressed: _compose,
@@ -804,29 +847,31 @@ class _PrototypeHomeScreenState extends ConsumerState<PrototypeHomeScreen>
               label: const Text('Compose'),
             )
           : null,
-      bottomNavigationBar: NavigationBar(
-        backgroundColor: const Color(0xFF101720),
-        indicatorColor: const Color(0xFF21423F),
-        selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.inbox_outlined),
-            selectedIcon: Icon(Icons.inbox_rounded),
-            label: 'Inbox',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.verified_user_outlined),
-            selectedIcon: Icon(Icons.verified_user_rounded),
-            label: 'Certificates',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings_rounded),
-            label: 'Settings',
-          ),
-        ],
-      ),
+      bottomNavigationBar: wide
+          ? null
+          : NavigationBar(
+              backgroundColor: const Color(0xFF101720),
+              indicatorColor: const Color(0xFF21423F),
+              selectedIndex: _index,
+              onDestinationSelected: (i) => setState(() => _index = i),
+              destinations: const [
+                NavigationDestination(
+                  icon: Icon(Icons.inbox_outlined),
+                  selectedIcon: Icon(Icons.inbox_rounded),
+                  label: 'Inbox',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.verified_user_outlined),
+                  selectedIcon: Icon(Icons.verified_user_rounded),
+                  label: 'Certificates',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.settings_outlined),
+                  selectedIcon: Icon(Icons.settings_rounded),
+                  label: 'Settings',
+                ),
+              ],
+            ),
     );
   }
 }
@@ -1275,7 +1320,7 @@ class StartupGate extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final saved = ref.watch(savedEmailProvider);
+    final saved = ref.watch(startupEmailProvider);
 
     return saved.when(
       data: (email) =>
@@ -1288,4 +1333,18 @@ class StartupGate extends ConsumerWidget {
       error: (error, stackTrace) => const WelcomeScreen(),
     );
   }
+}
+
+/// Lets a mouse or trackpad drag-scroll, pull to refresh and swipe rows,
+/// so Windows and Linux behave like the phone.
+class AppScrollBehavior extends MaterialScrollBehavior {
+  const AppScrollBehavior();
+
+  @override
+  Set<PointerDeviceKind> get dragDevices => <PointerDeviceKind>{
+        PointerDeviceKind.touch,
+        PointerDeviceKind.mouse,
+        PointerDeviceKind.stylus,
+        PointerDeviceKind.trackpad,
+      };
 }

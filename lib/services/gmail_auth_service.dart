@@ -1,6 +1,9 @@
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'dart:io' show Platform;
+
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:google_sign_in_platform_interface/google_sign_in_platform_interface.dart';
+
+import 'local_store.dart';
 
 /// Handles Google account sign-in and Gmail authorization.
 ///
@@ -27,8 +30,16 @@ class GmailAuthService {
 
   static const String _emailKey = 'signmail.account.email';
 
+  /// Google Sign-In only exists on phones. Windows and Linux need their own
+  /// browser-based sign-in, which is a later step.
+  static bool get isSupported => Platform.isAndroid || Platform.isIOS;
+
+  static const String _unsupportedMessage =
+      'Google sign-in is not available on Windows and Linux yet. '
+      'Use the Android app for now.';
+
   final GoogleSignIn _googleSignIn = GoogleSignIn.instance;
-  final FlutterSecureStorage _storage = const FlutterSecureStorage();
+  final LocalStore _store = const LocalStore();
 
   bool _initialized = false;
   GoogleSignInAccount? _account;
@@ -46,10 +57,37 @@ class GmailAuthService {
 
   /// The email address connected on this device, or null when signed out.
   Future<String?> savedEmail() async {
+    final stored = await _store.read(key: _emailKey);
+    if (stored == null || stored.isEmpty) {
+      return null;
+    }
+    return stored;
+  }
+
+  /// Like [savedEmail], but when nothing is saved it asks Google (without
+  /// showing any screen) whether this device already has an authorized
+  /// account, so the user does not have to onboard again.
+  Future<String?> restoreSession() async {
+    final existing = await savedEmail();
+    if (existing != null || !isSupported) {
+      return existing;
+    }
+
     try {
-      return await _storage.read(key: _emailKey);
+      await initialize();
+      final Future<GoogleSignInAccount?>? attempt =
+          _googleSignIn.attemptLightweightAuthentication();
+      final GoogleSignInAccount? account =
+          attempt == null ? null : await attempt;
+
+      if (account == null) {
+        return null;
+      }
+
+      _account = account;
+      await _store.write(key: _emailKey, value: account.email);
+      return account.email;
     } catch (_) {
-      // Secure storage can be unreadable after a restore; treat as signed out.
       return null;
     }
   }
@@ -59,16 +97,19 @@ class GmailAuthService {
   /// The connected address is remembered so the next app start can skip
   /// the welcome flow.
   Future<GmailAuthorization> connectGmail() async {
+    if (!isSupported) {
+      throw const GmailAuthException(_unsupportedMessage);
+    }
+
     await initialize();
 
-    final GoogleSignInAccount account =
-        await _googleSignIn.authenticate();
+    final GoogleSignInAccount account = await _googleSignIn.authenticate();
 
     final GoogleSignInClientAuthorization authorization =
         await account.authorizationClient.authorizeScopes(_scopes);
 
     _account = account;
-    await _storage.write(key: _emailKey, value: account.email);
+    await _store.write(key: _emailKey, value: account.email);
 
     return GmailAuthorization(
       email: account.email,
@@ -84,6 +125,10 @@ class GmailAuthService {
   /// Throws [GmailAuthException] when Google needs the user to sign in or
   /// approve access again.
   Future<String> accessToken({bool background = false}) async {
+    if (!isSupported) {
+      throw const GmailAuthException(_unsupportedMessage);
+    }
+
     await initialize();
 
     if (background) {
@@ -172,7 +217,11 @@ class GmailAuthService {
   /// Sign out of the Google account in this app and forget it.
   Future<void> disconnect() async {
     _account = null;
-    await _storage.delete(key: _emailKey);
+    await _store.delete(key: _emailKey);
+
+    if (!isSupported) {
+      return;
+    }
 
     try {
       await initialize();

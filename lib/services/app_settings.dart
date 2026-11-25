@@ -1,9 +1,9 @@
 import 'dart:convert';
 
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'local_store.dart';
 
 /// App version shown on the settings page.
-const String appVersion = '0.1.0';
+const String appVersion = '0.2.0';
 
 /// Every user-changeable preference of the app.
 class AppSettings {
@@ -190,7 +190,7 @@ class SettingsStore {
   const SettingsStore();
 
   static const String _key = 'signmail.settings.v1';
-  static const FlutterSecureStorage _storage = FlutterSecureStorage();
+  static const LocalStore _storage = LocalStore();  
 
   Future<AppSettings> load() async {
     try {

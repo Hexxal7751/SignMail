@@ -6,6 +6,34 @@ import 'package:enough_mail/enough_mail.dart';
 
 import 'gmail_auth_service.dart';
 
+/// What a mail folder is for.
+enum FolderKind { inbox, starred, sent, drafts, all, spam, trash, other }
+
+/// A Gmail folder (label) that can be opened.
+class MailFolder {
+  const MailFolder({
+    required this.path,
+    required this.name,
+    required this.kind,
+  });
+
+  final String path;
+  final String name;
+  final FolderKind kind;
+
+  static const MailFolder inbox = MailFolder(
+    path: 'INBOX',
+    name: 'Inbox',
+    kind: FolderKind.inbox,
+  );
+
+  @override
+  bool operator ==(Object other) => other is MailFolder && other.path == path;
+
+  @override
+  int get hashCode => path.hashCode;
+}
+
 /// One row of the inbox list.
 class MailSummary {
   const MailSummary({
@@ -16,6 +44,7 @@ class MailSummary {
     required this.date,
     required this.isSeen,
     required this.isFlagged,
+    this.hasAttachment = false,
   });
 
   final int uid;
@@ -25,19 +54,23 @@ class MailSummary {
   final DateTime? date;
   final bool isSeen;
   final bool isFlagged;
+  final bool hasAttachment;
 
-  /// The same message, shown as read.
-  MailSummary asSeen() {
+  MailSummary copyWith({bool? isSeen, bool? isFlagged}) {
     return MailSummary(
       uid: uid,
       senderName: senderName,
       senderEmail: senderEmail,
       subject: subject,
       date: date,
-      isSeen: true,
-      isFlagged: isFlagged,
+      isSeen: isSeen ?? this.isSeen,
+      isFlagged: isFlagged ?? this.isFlagged,
+      hasAttachment: hasAttachment,
     );
   }
+
+  /// The same message, shown as read.
+  MailSummary asSeen() => copyWith(isSeen: true);
 
   /// Short date for list rows: time today, otherwise day and month.
   String get dateLabel {
@@ -92,13 +125,48 @@ class MailSummary {
   ];
 }
 
+/// A file attached to a received message.
+class MailAttachment {
+  const MailAttachment({
+    required this.fetchId,
+    required this.name,
+    this.size,
+    this.mimeType,
+  });
+
+  final String fetchId;
+  final String name;
+  final int? size;
+  final String? mimeType;
+
+  /// True for pictures the app can show itself.
+  bool get isImage {
+    final type = (mimeType ?? '').toLowerCase();
+    return type.startsWith('image/') && type != 'image/svg+xml';
+  }
+
+  String get sizeLabel {
+    final bytes = size;
+    if (bytes == null) {
+      return '';
+    }
+    if (bytes < 1024) {
+      return '$bytes B';
+    }
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    }
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+}
+
 /// The downloaded content of one message.
 class MailBody {
   const MailBody({
     required this.text,
     required this.toLine,
-    required this.attachmentNames,
     required this.wasHtmlOnly,
+    this.attachments = const <MailAttachment>[],
     this.messageId,
     this.references,
     this.replyToEmail,
@@ -108,7 +176,7 @@ class MailBody {
 
   final String text;
   final String toLine;
-  final List<String> attachmentNames;
+  final List<MailAttachment> attachments;
 
   /// True when the message had no plain-text version and was converted.
   final bool wasHtmlOnly;
@@ -119,6 +187,9 @@ class MailBody {
   final String? replyToEmail;
   final List<String> toEmails;
   final List<String> ccEmails;
+
+  List<String> get attachmentNames =>
+      attachments.map((attachment) => attachment.name).toList();
 }
 
 /// A file attached to an outgoing message.
@@ -167,10 +238,10 @@ class MailServiceException implements Exception {
   String toString() => message;
 }
 
-/// Reads Gmail over IMAP using the signed-in Google account (XOAUTH2).
+/// Reads and manages Gmail over IMAP using the signed-in Google account
+/// (XOAUTH2), and sends over SMTP.
 ///
-/// Each call opens a short-lived secure connection. A long-lived connection
-/// for live updates comes with the sync work.
+/// Each call opens a short-lived secure connection.
 class MailService {
   MailService(this._auth, {this.background = false});
 
@@ -184,16 +255,51 @@ class MailService {
   static const String _smtpHost = 'smtp.gmail.com';
   static const int _smtpPort = 465;
 
-  /// The newest [count] messages of the inbox, newest first.
-  Future<List<MailSummary>> fetchInbox({int count = 40}) {
-    return _withInbox<List<MailSummary>>((client, inbox) async {
-      if (inbox.messagesExists == 0) {
+  static const String _listCriteria = '(UID FLAGS ENVELOPE BODYSTRUCTURE)';
+
+  /// All folders and labels of the account.
+  Future<List<MailFolder>> fetchFolders() {
+    return _session<List<MailFolder>>((client) async {
+      final boxes = await client.listMailboxes(recursive: true);
+
+      final folders = <MailFolder>[];
+      for (final box in boxes) {
+        if (box.isNotSelectable) {
+          continue;
+        }
+        final kind = _kindOf(box);
+        folders.add(
+          MailFolder(path: box.path, name: _folderName(box, kind), kind: kind),
+        );
+      }
+
+      folders.sort((a, b) {
+        final byKind = _order(a.kind).compareTo(_order(b.kind));
+        return byKind != 0
+            ? byKind
+            : a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+
+      if (!folders.any((folder) => folder.kind == FolderKind.inbox)) {
+        folders.insert(0, MailFolder.inbox);
+      }
+      return folders;
+    });
+  }
+
+  /// The newest [count] messages of [folder], newest first.
+  Future<List<MailSummary>> fetchInbox({
+    int count = 40,
+    String folder = 'INBOX',
+  }) {
+    return _withFolder<List<MailSummary>>(folder, (client, box) async {
+      if (box.messagesExists == 0) {
         return const <MailSummary>[];
       }
 
       final result = await client.fetchRecentMessages(
         messageCount: count - 1,
-        criteria: '(UID FLAGS ENVELOPE)',
+        criteria: _listCriteria,
       );
 
       final summaries = <MailSummary>[];
@@ -208,9 +314,56 @@ class MailService {
     });
   }
 
+  /// Messages of [folder] that contain [query], newest first.
+  Future<List<MailSummary>> searchMessages(
+    String query, {
+    String folder = 'INBOX',
+    int limit = 60,
+  }) {
+    final safe = query.replaceAll(RegExp(r'["\\\r\n]'), ' ').trim();
+
+    return _withFolder<List<MailSummary>>(folder, (client, box) async {
+      if (safe.isEmpty || box.messagesExists == 0) {
+        return const <MailSummary>[];
+      }
+
+      final found = await client.uidSearchMessages(
+        searchCriteria: 'TEXT "$safe"',
+      );
+
+      final ids = List<int>.of(found.matchingSequence?.toList() ?? <int>[]);
+      if (ids.isEmpty) {
+        return const <MailSummary>[];
+      }
+
+      ids.sort();
+      final latest =
+          ids.length > limit ? ids.sublist(ids.length - limit) : ids;
+
+      final result = await client.uidFetchMessages(
+        MessageSequence.fromIds(latest, isUid: true),
+        _listCriteria,
+      );
+
+      final summaries = <MailSummary>[];
+      for (final message in result.messages) {
+        final summary = _summaryOf(message);
+        if (summary != null) {
+          summaries.add(summary);
+        }
+      }
+      summaries.sort((a, b) => b.uid.compareTo(a.uid));
+      return summaries;
+    });
+  }
+
   /// Downloads one message, and marks it as read when [markSeen] is set.
-  Future<MailBody> fetchBody(int uid, {bool markSeen = true}) {
-    return _withInbox<MailBody>((client, inbox) async {
+  Future<MailBody> fetchBody(
+    int uid, {
+    String folder = 'INBOX',
+    bool markSeen = true,
+  }) {
+    return _withFolder<MailBody>(folder, (client, box) async {
       final result = await client.uidFetchMessage(
         uid,
         '(FLAGS BODY.PEEK[])',
@@ -218,7 +371,7 @@ class MailService {
 
       if (result.messages.isEmpty) {
         throw const MailServiceException(
-          'This message is no longer in your inbox.',
+          'This message is no longer in this folder.',
         );
       }
 
@@ -226,14 +379,21 @@ class MailService {
       final plain = (message.decodeTextPlainPart() ?? '').trim();
       final html = (message.decodeTextHtmlPart() ?? '').trim();
 
-      var attachments = <String>[];
+      var attachments = <MailAttachment>[];
       try {
         attachments = message
             .findContentInfo()
-            .map((info) => info.fileName ?? 'attachment')
+            .map(
+              (info) => MailAttachment(
+                fetchId: info.fetchId,
+                name: info.fileName ?? 'attachment',
+                size: info.size,
+                mimeType: info.mediaType?.text,
+              ),
+            )
             .toList();
       } catch (_) {
-        // Attachment names are optional; the message can still be read.
+        // Attachment info is optional; the message can still be read.
       }
 
       if (markSeen) {
@@ -263,7 +423,7 @@ class MailService {
             ? plain
             : (html.isNotEmpty ? htmlToPlainText(html) : ''),
         toLine: recipients.map(_labelOf).join(', '),
-        attachmentNames: attachments,
+        attachments: attachments,
         wasHtmlOnly: plain.isEmpty && html.isNotEmpty,
         messageId: message.getHeaderValue('message-id')?.trim(),
         references: message.getHeaderValue('references')?.trim(),
@@ -271,6 +431,78 @@ class MailService {
         toEmails: recipients.map((a) => a.email).toList(),
         ccEmails: copies.map((a) => a.email).toList(),
       );
+    });
+  }
+
+  /// Downloads the content of one attachment.
+  Future<Uint8List> fetchAttachment(String folder, int uid, String fetchId) {
+    return _withFolder<Uint8List>(folder, (client, box) async {
+      final result = await client.uidFetchMessage(uid, '(BODY.PEEK[])');
+
+      if (result.messages.isEmpty) {
+        throw const MailServiceException(
+          'This message is no longer in this folder.',
+        );
+      }
+
+      final bytes = result.messages.first.getPart(fetchId)?.decodeContentBinary();
+      if (bytes == null) {
+        throw const MailServiceException('Could not read this attachment.');
+      }
+      return bytes;
+    });
+  }
+
+  /// Marks a message as read or unread.
+  Future<void> setSeen(String folder, int uid, bool seen) {
+    return _withFolder<void>(folder, (client, box) async {
+      final sequence = MessageSequence.fromId(uid, isUid: true);
+      if (seen) {
+        await client.uidMarkSeen(sequence);
+      } else {
+        await client.uidMarkUnseen(sequence);
+      }
+    });
+  }
+
+  /// Adds or removes the star.
+  Future<void> setFlagged(String folder, int uid, bool flagged) {
+    return _withFolder<void>(folder, (client, box) async {
+      final sequence = MessageSequence.fromId(uid, isUid: true);
+      if (flagged) {
+        await client.uidMarkFlagged(sequence);
+      } else {
+        await client.uidMarkUnflagged(sequence);
+      }
+    });
+  }
+
+  /// Moves a message to another folder.
+  Future<void> moveMessage(String folder, int uid, String targetPath) {
+    return _withFolder<void>(folder, (client, box) async {
+      await client.uidMove(
+        MessageSequence.fromId(uid, isUid: true),
+        targetMailboxPath: targetPath,
+      );
+    });
+  }
+
+  /// Moves a message to Trash, or deletes it for good when it is already
+  /// in Trash.
+  Future<void> deleteMessage(String folder, int uid, {String? trashPath}) {
+    return _withFolder<void>(folder, (client, box) async {
+      final sequence = MessageSequence.fromId(uid, isUid: true);
+
+      if (trashPath != null && folder == trashPath) {
+        await client.uidMarkDeleted(sequence);
+        await client.uidExpunge(sequence);
+      } else if (trashPath != null) {
+        await client.uidMove(sequence, targetMailboxPath: trashPath);
+      } else {
+        throw const MailServiceException(
+          'Could not find the Trash folder yet. Try again in a moment.',
+        );
+      }
     });
   }
 
@@ -374,10 +606,8 @@ class MailService {
     }
   }
 
-  /// Connects, signs in, opens the inbox, runs [action], then disconnects.
-  Future<T> _withInbox<T>(
-    Future<T> Function(ImapClient client, Mailbox inbox) action,
-  ) async {
+  /// Connects, signs in, runs [action], then disconnects.
+  Future<T> _session<T>(Future<T> Function(ImapClient client) action) async {
     final email = await _auth.savedEmail();
     if (email == null) {
       throw const MailServiceException(
@@ -392,8 +622,7 @@ class MailService {
     try {
       await client.connectToServer(_host, _port);
       await client.authenticateWithOAuth2(email, token);
-      final inbox = await client.selectInbox();
-      return await action(client, inbox);
+      return await action(client);
     } on MailServiceException {
       rethrow;
     } on ImapException catch (error) {
@@ -422,6 +651,19 @@ class MailService {
     }
   }
 
+  /// Like [_session], and opens the folder at [path] first.
+  Future<T> _withFolder<T>(
+    String path,
+    Future<T> Function(ImapClient client, Mailbox box) action,
+  ) {
+    return _session<T>((client) async {
+      final box = path.toUpperCase() == 'INBOX'
+          ? await client.selectInbox()
+          : await client.selectMailboxByPath(path);
+      return action(client, box);
+    });
+  }
+
   Future<void> _close(ImapClient client) async {
     try {
       if (client.isLoggedIn) {
@@ -435,6 +677,61 @@ class MailService {
       await client.disconnect();
     } catch (_) {
       // Already closed.
+    }
+  }
+
+  FolderKind _kindOf(Mailbox box) {
+    if (box.isInbox || box.path.toUpperCase() == 'INBOX') {
+      return FolderKind.inbox;
+    }
+    if (box.isSent) return FolderKind.sent;
+    if (box.isDrafts) return FolderKind.drafts;
+    if (box.isJunk) return FolderKind.spam;
+    if (box.isTrash) return FolderKind.trash;
+    if (box.hasFlag(MailboxFlag.flagged)) return FolderKind.starred;
+    if (box.hasFlag(MailboxFlag.all) || box.isArchive) return FolderKind.all;
+    return FolderKind.other;
+  }
+
+  String _folderName(Mailbox box, FolderKind kind) {
+    switch (kind) {
+      case FolderKind.inbox:
+        return 'Inbox';
+      case FolderKind.starred:
+        return 'Starred';
+      case FolderKind.sent:
+        return 'Sent';
+      case FolderKind.drafts:
+        return 'Drafts';
+      case FolderKind.all:
+        return 'All Mail';
+      case FolderKind.spam:
+        return 'Spam';
+      case FolderKind.trash:
+        return 'Trash';
+      case FolderKind.other:
+        return box.name;
+    }
+  }
+
+  int _order(FolderKind kind) {
+    switch (kind) {
+      case FolderKind.inbox:
+        return 0;
+      case FolderKind.starred:
+        return 1;
+      case FolderKind.sent:
+        return 2;
+      case FolderKind.drafts:
+        return 3;
+      case FolderKind.all:
+        return 4;
+      case FolderKind.spam:
+        return 5;
+      case FolderKind.trash:
+        return 6;
+      case FolderKind.other:
+        return 7;
     }
   }
 
@@ -452,6 +749,13 @@ class MailService {
     final rawSubject =
         (envelope?.subject ?? message.decodeSubject() ?? '').trim();
 
+    var hasAttachment = false;
+    try {
+      hasAttachment = message.hasAttachments();
+    } catch (_) {
+      // The paperclip is optional.
+    }
+
     return MailSummary(
       uid: uid,
       senderName: sender == null ? 'Unknown sender' : _nameOf(sender),
@@ -460,6 +764,7 @@ class MailService {
       date: envelope?.date ?? message.decodeDate(),
       isSeen: message.isSeen,
       isFlagged: message.isFlagged,
+      hasAttachment: hasAttachment,
     );
   }
 
