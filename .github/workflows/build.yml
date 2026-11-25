@@ -195,10 +195,6 @@ jobs:
   windows:
     if: ${{ !inputs.make_keystore }}
     runs-on: windows-latest
-    env:
-      # Newer Visual Studio rejects the old coroutine header used by the
-      # local_auth_windows plugin unless this is defined.
-      CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -209,13 +205,31 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Show Flutter and Visual Studio details
+        continue-on-error: true
+        run: flutter doctor -v
+
       - name: Generate Windows project files
         shell: bash
         run: |
           flutter config --enable-windows-desktop
           flutter create --platforms=windows --org net.hexxal.signmail .
           rm -f test/widget_test.dart
-          sed -i '/^project(/a add_definitions(-D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)' windows/CMakeLists.txt
+
+      # Newer Visual Studio rejects the old coroutine header used by the
+      # local_auth_windows plugin unless this is defined. It is set just
+      # before the plugins are added, after the compiler has been detected.
+      - name: Silence the coroutine deprecation error
+        shell: bash
+        run: |
+          if grep -q '^include(flutter/generated_plugins.cmake)' windows/CMakeLists.txt; then
+            sed -i 's|^include(flutter/generated_plugins.cmake)|add_definitions(-D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)\ninclude(flutter/generated_plugins.cmake)|' windows/CMakeLists.txt
+          else
+            echo "::error::Could not find the plugin include line in windows/CMakeLists.txt"
+            cat windows/CMakeLists.txt
+            exit 1
+          fi
+          grep -n -B1 -A1 'SILENCE_EXPERIMENTAL' windows/CMakeLists.txt
 
       - name: Install dependencies
         run: flutter pub get
