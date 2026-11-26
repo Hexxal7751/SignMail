@@ -1,9 +1,12 @@
 import 'dart:async' show TimeoutException;
+import 'dart:convert' show base64Encode, utf8;
 import 'dart:io' show SocketException, TlsException;
 import 'dart:typed_data' show Uint8List;
 
 import 'package:enough_mail/enough_mail.dart';
 
+import '../smime/smime_inspector.dart';
+import '../smime/trust_service.dart';
 import 'gmail_auth_service.dart';
 
 /// What a mail folder is for.
@@ -132,12 +135,16 @@ class MailAttachment {
     required this.name,
     this.size,
     this.mimeType,
+    this.data,
   });
 
   final String fetchId;
   final String name;
   final int? size;
   final String? mimeType;
+
+  /// The file content, already downloaded with the message.
+  final Uint8List? data;
 
   /// True for pictures the app can show itself.
   bool get isImage {
@@ -160,12 +167,25 @@ class MailAttachment {
   }
 }
 
+/// A picture that is part of an HTML mail (referenced as `cid:`).
+class InlineImage {
+  const InlineImage({required this.mimeType, required this.bytes});
+
+  final String mimeType;
+  final Uint8List bytes;
+
+  String get dataUri => 'data:$mimeType;base64,${base64Encode(bytes)}';
+}
+
 /// The downloaded content of one message.
 class MailBody {
   const MailBody({
     required this.text,
     required this.toLine,
     required this.wasHtmlOnly,
+    this.html,
+    this.inlineImages = const <String, InlineImage>{},
+    this.smime,
     this.attachments = const <MailAttachment>[],
     this.messageId,
     this.references,
@@ -180,6 +200,15 @@ class MailBody {
 
   /// True when the message had no plain-text version and was converted.
   final bool wasHtmlOnly;
+
+  /// The HTML version of the message, if there is one (not yet cleaned).
+  final String? html;
+
+  /// Pictures inside the HTML, by lower-case content id.
+  final Map<String, InlineImage> inlineImages;
+
+  /// What was found out about S/MIME protection (null: not S/MIME).
+  final SmimeResult? smime;
 
   /// Header values needed to reply in the same conversation.
   final String? messageId;
@@ -376,24 +405,45 @@ class MailService {
       }
 
       final message = result.messages.first;
-      final plain = (message.decodeTextPlainPart() ?? '').trim();
-      final html = (message.decodeTextHtmlPart() ?? '').trim();
 
-      var attachments = <MailAttachment>[];
+      // S/MIME: check the signature on the raw message as it arrived.
+      final senders = message.from;
+      final fromEmail =
+          (senders != null && senders.isNotEmpty) ? senders.first.email : '';
+
+      SmimeResult? smime;
+      final raw = _rawBytes(message);
+      if (raw != null) {
+        try {
+          final trust = await TrustService.instance.load();
+          smime = inspectSmime(
+            raw,
+            fromEmail: fromEmail,
+            trust: trust,
+            messageDate: message.decodeDate(),
+          );
+        } catch (_) {
+          smime = null;
+        }
+      }
+
+      // An opaque signature hides the real message inside the signature.
+      MimePart view = message;
+      final innerEntity = smime?.innerEntity;
+      if (innerEntity != null) {
+        final inner = MimeMessage.parseFromText(innerEntity)..parse();
+        view = inner;
+      }
+
+      final plain = (view.decodeTextPlainPart() ?? '').trim();
+      final html = (view.decodeTextHtmlPart() ?? '').trim();
+
+      final inlineImages = <String, InlineImage>{};
+      final attachments = <MailAttachment>[];
       try {
-        attachments = message
-            .findContentInfo()
-            .map(
-              (info) => MailAttachment(
-                fetchId: info.fetchId,
-                name: info.fileName ?? 'attachment',
-                size: info.size,
-                mimeType: info.mediaType?.text,
-              ),
-            )
-            .toList();
+        _collectParts(view, inlineImages, attachments);
       } catch (_) {
-        // Attachment info is optional; the message can still be read.
+        // Attachments are optional; the message can still be read.
       }
 
       if (markSeen) {
@@ -422,6 +472,9 @@ class MailService {
         text: plain.isNotEmpty
             ? plain
             : (html.isNotEmpty ? htmlToPlainText(html) : ''),
+        html: html.isEmpty ? null : html,
+        inlineImages: inlineImages,
+        smime: smime,
         toLine: recipients.map(_labelOf).join(', '),
         attachments: attachments,
         wasHtmlOnly: plain.isEmpty && html.isNotEmpty,
@@ -434,7 +487,91 @@ class MailService {
     });
   }
 
-  /// Downloads the content of one attachment.
+  /// The message exactly as the server sent it, or null if unavailable.
+  Uint8List? _rawBytes(MimeMessage message) {
+    final data = message.mimeData;
+    if (data is BinaryMimeData) {
+      return data.data;
+    }
+    if (data is TextMimeData) {
+      return Uint8List.fromList(utf8.encode(data.text));
+    }
+    return null;
+  }
+
+  /// Sorts the leaf parts of a message into pictures used by the HTML
+  /// ([inline]) and downloadable files ([attachments]).
+  void _collectParts(
+    MimePart part,
+    Map<String, InlineImage> inline,
+    List<MailAttachment> attachments,
+  ) {
+    final children = part.parts;
+    if (children != null && children.isNotEmpty) {
+      for (final child in children) {
+        _collectParts(child, inline, attachments);
+      }
+      return;
+    }
+
+    final type = part.mediaType.text.toLowerCase();
+    if (type.startsWith('multipart/') ||
+        type == 'application/pkcs7-signature' ||
+        type == 'application/x-pkcs7-signature') {
+      return;
+    }
+
+    final disposition = part.getHeaderContentDisposition();
+    final isAttachment = disposition?.disposition == ContentDisposition.attachment;
+    final fileName = part.decodeFileName();
+
+    final isBodyText =
+        (type == 'text/plain' || type == 'text/html') &&
+            !isAttachment &&
+            fileName == null;
+    if (isBodyText) {
+      return;
+    }
+
+    Uint8List? bytes;
+    try {
+      bytes = part.decodeContentBinary();
+    } catch (_) {
+      bytes = null;
+    }
+    if (bytes == null) {
+      return;
+    }
+
+    final contentId = part
+        .getHeaderValue('content-id')
+        ?.trim()
+        .replaceAll(RegExp(r'^<|>$'), '');
+
+    if (contentId != null &&
+        contentId.isNotEmpty &&
+        type.startsWith('image/') &&
+        !isAttachment) {
+      if (bytes.length <= 6 * 1024 * 1024) {
+        inline[contentId.toLowerCase()] =
+            InlineImage(mimeType: type, bytes: bytes);
+      }
+      return;
+    }
+
+    attachments.add(
+      MailAttachment(
+        fetchId: '${attachments.length}',
+        name: fileName ?? 'attachment',
+        size: bytes.length,
+        mimeType: type,
+        data: bytes,
+      ),
+    );
+  }
+
+  /// Downloads the content of one attachment (fallback when it was not
+  /// already loaded with the message).
   Future<Uint8List> fetchAttachment(String folder, int uid, String fetchId) {
     return _withFolder<Uint8List>(folder, (client, box) async {
       final result = await client.uidFetchMessage(uid, '(BODY.PEEK[])');

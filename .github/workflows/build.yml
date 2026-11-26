@@ -50,6 +50,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Download public CA certificates (S/MIME trust list)
+        shell: bash
+        run: |
+          mkdir -p assets/roots
+          curl --fail --silent --show-error --retry 3 -L \
+            https://curl.se/ca/cacert.pem -o assets/roots/cacert.pem
+          grep -c 'BEGIN CERTIFICATE' assets/roots/cacert.pem
+
       - name: Set up Java
         uses: actions/setup-java@v5
         with:
@@ -147,6 +155,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Download public CA certificates (S/MIME trust list)
+        shell: bash
+        run: |
+          mkdir -p assets/roots
+          curl --fail --silent --show-error --retry 3 -L \
+            https://curl.se/ca/cacert.pem -o assets/roots/cacert.pem
+          grep -c 'BEGIN CERTIFICATE' assets/roots/cacert.pem
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -198,6 +214,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Download public CA certificates (S/MIME trust list)
+        shell: bash
+        run: |
+          mkdir -p assets/roots
+          curl --fail --silent --show-error --retry 3 -L \
+            https://curl.se/ca/cacert.pem -o assets/roots/cacert.pem
+          grep -c 'BEGIN CERTIFICATE' assets/roots/cacert.pem
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2

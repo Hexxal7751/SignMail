@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'local_store.dart';
 
 /// App version shown on the settings page.
-const String appVersion = '0.2.0';
+const String appVersion = '0.3.0';
 
 /// Every user-changeable preference of the app.
 class AppSettings {

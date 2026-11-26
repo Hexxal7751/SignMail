@@ -1,11 +1,16 @@
+import 'dart:typed_data' show Uint8List;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../mail/html_mail_view.dart';
 import '../providers.dart';
 import '../services/attachment_files.dart';
 import '../services/mail_service.dart';
+import '../smime/smime_inspector.dart';
+import '../smime/trust_service.dart';
+import '../smime/x509.dart';
 import 'compose_screen.dart';
-import 'dart:typed_data' show Uint8List;
 
 const Color _mint = Color(0xFF69E0D0);
 const Color _muted = Color(0xFF8F9EAE);
@@ -215,11 +220,9 @@ class MessageScreen extends ConsumerWidget {
                   summary.fullDateLabel,
                   style: const TextStyle(color: _muted, fontSize: 12),
                 ),
-                const SizedBox(height: 14),
-                const _SignatureNote(),
-                const SizedBox(height: 18),
+                const SizedBox(height: 16),
                 const Divider(color: Color(0xFF263342), height: 1),
-                const SizedBox(height: 18),
+                const SizedBox(height: 16),
                 body.when(
                   data: (mail) => _BodyContent(
                     mail: mail,
@@ -283,31 +286,240 @@ class SenderAvatar extends StatelessWidget {
   }
 }
 
-class _SignatureNote extends StatelessWidget {
-  const _SignatureNote();
+class _SmimeBanner extends StatelessWidget {
+  const _SmimeBanner({required this.result, required this.onTap});
+
+  final SmimeResult? result;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-      decoration: BoxDecoration(
-        color: const Color(0xFF19252F),
-        borderRadius: BorderRadius.circular(30),
-        border: Border.all(color: const Color(0xFF263342)),
+    final value = result;
+
+    if (value == null) {
+      return const Padding(
+        padding: EdgeInsets.only(bottom: 14),
+        child: Row(
+          children: [
+            Icon(Icons.shield_outlined, size: 14, color: _muted),
+            SizedBox(width: 6),
+            Text(
+              'Not signed or encrypted',
+              style: TextStyle(color: _muted, fontSize: 11),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final Color color;
+    final IconData icon;
+    switch (value.status) {
+      case SmimeStatus.signedTrusted:
+        color = _mint;
+        icon = Icons.verified_user_rounded;
+      case SmimeStatus.signedUnverified:
+        color = const Color(0xFFF2C14E);
+        icon = Icons.gpp_maybe_rounded;
+      case SmimeStatus.signedInvalid:
+        color = const Color(0xFFE5646E);
+        icon = Icons.gpp_bad_rounded;
+      case SmimeStatus.encrypted:
+        color = const Color(0xFF6FA8FF);
+        icon = Icons.lock_rounded;
+      case SmimeStatus.unsupported:
+        color = _muted;
+        icon = Icons.help_outline_rounded;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Material(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: color.withValues(alpha: 0.45)),
+            ),
+            child: Row(
+              children: [
+                Icon(icon, color: color, size: 22),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        value.headline,
+                        style: TextStyle(
+                          color: color,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14,
+                        ),
+                      ),
+                      if (value.signerEmail != null &&
+                          value.status != SmimeStatus.encrypted)
+                        Text(
+                          value.signerEmail!,
+                          style: const TextStyle(color: _muted, fontSize: 12),
+                        ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right_rounded, color: _muted),
+              ],
+            ),
+          ),
+        ),
       ),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
+    );
+  }
+}
+
+String _day(DateTime value) {
+  final v = value.toLocal();
+  return '${v.year}-${v.month.toString().padLeft(2, '0')}-'
+      '${v.day.toString().padLeft(2, '0')}';
+}
+
+void _showSmimeSheet(
+  BuildContext context,
+  SmimeResult result, {
+  Future<void> Function(X509Certificate certificate)? onTrust,
+}) {
+  final cert = result.certificate;
+
+  Widget line(String label, String value, {bool mono = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.shield_outlined, size: 14, color: _muted),
-          SizedBox(width: 6),
           Text(
-            'S/MIME signature: not checked yet',
-            style: TextStyle(color: _muted, fontSize: 11),
+            label.toUpperCase(),
+            style: const TextStyle(
+              color: _muted,
+              fontSize: 10,
+              letterSpacing: 1.2,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 2),
+          SelectableText(
+            value,
+            style: TextStyle(
+              fontSize: mono ? 11 : 13.5,
+              fontFamily: mono ? 'monospace' : null,
+              height: 1.35,
+            ),
           ),
         ],
       ),
     );
   }
+
+  showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: const Color(0xFF101720),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+    ),
+    builder: (sheetContext) => SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.85,
+        ),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(22, 20, 22, 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                result.headline,
+                style: const TextStyle(
+                  fontSize: 19,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 12),
+              for (final detail in result.details)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.only(top: 2),
+                        child: Icon(Icons.circle, size: 6, color: _muted),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          detail,
+                          style: const TextStyle(fontSize: 13, height: 1.4),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              if (cert != null) ...[
+                const SizedBox(height: 14),
+                const Divider(color: Color(0xFF263342), height: 1),
+                const SizedBox(height: 14),
+                line('Signer', cert.commonName),
+                if (cert.emails.isNotEmpty)
+                  line('E-mail address', cert.emails.join(', ')),
+                line('Issued by', cert.issuerName),
+                line(
+                  'Valid',
+                  '${_day(cert.notBefore)}  to  ${_day(cert.notAfter)}',
+                ),
+                if (result.chainNames.length > 1)
+                  line('Chain', result.chainNames.join('  →  ')),
+                if (result.hashName != null) line('Hash', result.hashName!),
+                if (result.signingTime != null)
+                  line('Signed at', result.signingTime!.toLocal().toString()),
+                line('Fingerprint (SHA-256)', cert.fingerprintDisplay,
+                    mono: true),
+              ],
+              if (cert != null &&
+                  onTrust != null &&
+                  result.status == SmimeStatus.signedUnverified) ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: () async {
+                      Navigator.of(sheetContext).pop();
+                      await onTrust(cert);
+                    },
+                    icon: const Icon(Icons.verified_user_outlined),
+                    label: const Text('Trust this certificate'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _mint,
+                      foregroundColor: const Color(0xFF071311),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Only do this if you have checked the fingerprint with the '
+                  'sender through another channel.',
+                  style: TextStyle(color: _muted, fontSize: 11, height: 1.4),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 Future<void> _openAttachment(
@@ -320,18 +532,21 @@ Future<void> _openAttachment(
 }) async {
   final messenger = ScaffoldMessenger.of(context);
   messenger.hideCurrentSnackBar();
-  messenger.showSnackBar(
-    SnackBar(
-      content: Text('Downloading ${attachment.name}…'),
-      duration: const Duration(seconds: 30),
-    ),
-  );
 
   try {
-    final bytes = await ref
-        .read(mailServiceProvider)
-        .fetchAttachment(folder, uid, attachment.fetchId);
-    messenger.hideCurrentSnackBar();
+    Uint8List? bytes = attachment.data;
+    if (bytes == null) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Downloading ${attachment.name}…'),
+          duration: const Duration(seconds: 30),
+        ),
+      );
+      bytes = await ref
+          .read(mailServiceProvider)
+          .fetchAttachment(folder, uid, attachment.fetchId);
+      messenger.hideCurrentSnackBar();
+    }
 
     if (saveOnly) {
       final saved = await AttachmentFiles.save(attachment.name, bytes);
@@ -351,7 +566,7 @@ Future<void> _openAttachment(
         context: context,
         builder: (_) => _ImagePreview(
           name: attachment.name,
-          bytes: bytes,
+          bytes: bytes!,
         ),
       );
       return;
@@ -445,7 +660,7 @@ IconData _iconForAttachment(MailAttachment attachment) {
   return Icons.insert_drive_file_outlined;
 }
 
-class _BodyContent extends ConsumerWidget {
+class _BodyContent extends ConsumerStatefulWidget {
   const _BodyContent({
     required this.mail,
     required this.folder,
@@ -457,34 +672,79 @@ class _BodyContent extends ConsumerWidget {
   final int uid;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_BodyContent> createState() => _BodyContentState();
+}
+
+class _BodyContentState extends ConsumerState<_BodyContent> {
+  bool _showFormatted = true;
+
+  Future<void> _trust(X509Certificate certificate) async {
+    await TrustService.instance.pin(certificate.fingerprint);
+    // Load the message again so the status is worked out with the new trust.
+    ref.invalidate(
+      messageBodyProvider((folder: widget.folder, uid: widget.uid)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final mail = widget.mail;
+    final html = mail.html;
+    final hasHtml = html != null && html.trim().isNotEmpty;
+    final showFormatted = hasHtml && _showFormatted;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        _SmimeBanner(
+          result: mail.smime,
+          onTap: () {
+            final result = mail.smime;
+            if (result != null) {
+              _showSmimeSheet(context, result, onTrust: _trust);
+            }
+          },
+        ),
         if (mail.toLine.isNotEmpty) ...[
           Text(
             'To: ${mail.toLine}',
             style: const TextStyle(color: _muted, fontSize: 12),
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 12),
         ],
-        SelectableText(
-          mail.text.isEmpty
-              ? '(This message has no text content.)'
-              : mail.text,
-          style: const TextStyle(
-            fontSize: 15,
-            height: 1.55,
-            color: Color(0xFFDCE4EC),
+        if (hasHtml && mail.text.trim().isNotEmpty) ...[
+          Row(
+            children: [
+              ChoiceChip(
+                label: const Text('Formatted'),
+                selected: _showFormatted,
+                selectedColor: const Color(0xFF21423F),
+                onSelected: (_) => setState(() => _showFormatted = true),
+              ),
+              const SizedBox(width: 8),
+              ChoiceChip(
+                label: const Text('Plain text'),
+                selected: !_showFormatted,
+                selectedColor: const Color(0xFF21423F),
+                onSelected: (_) => setState(() => _showFormatted = false),
+              ),
+            ],
           ),
-        ),
-        if (mail.wasHtmlOnly) ...[
-          const SizedBox(height: 16),
-          const Text(
-            'Formatted (HTML) message shown as plain text for safety.',
-            style: TextStyle(color: _muted, fontSize: 11),
-          ),
+          const SizedBox(height: 12),
         ],
+        if (showFormatted)
+          HtmlMailView(html: html, inlineImages: mail.inlineImages)
+        else
+          SelectableText(
+            mail.text.isEmpty
+                ? '(This message has no text content.)'
+                : mail.text,
+            style: const TextStyle(
+              fontSize: 15,
+              height: 1.55,
+              color: Color(0xFFDCE4EC),
+            ),
+          ),
         if (mail.attachments.isNotEmpty) ...[
           const SizedBox(height: 24),
           Text(
@@ -508,8 +768,8 @@ class _BodyContent extends ConsumerWidget {
                   onTap: () => _openAttachment(
                     context,
                     ref,
-                    folder,
-                    uid,
+                    widget.folder,
+                    widget.uid,
                     attachment,
                   ),
                   child: Container(
@@ -552,8 +812,8 @@ class _BodyContent extends ConsumerWidget {
                           onPressed: () => _openAttachment(
                             context,
                             ref,
-                            folder,
-                            uid,
+                            widget.folder,
+                            widget.uid,
                             attachment,
                             saveOnly: true,
                           ),
