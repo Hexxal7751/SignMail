@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'providers.dart';
 import 'screens/app_lock_gate.dart';
+import 'screens/certificates_view.dart';
 import 'screens/compose_screen.dart';
 import 'screens/inbox_view.dart';
 import 'screens/settings_view.dart';
@@ -774,7 +775,7 @@ class _PrototypeHomeScreenState extends ConsumerState<PrototypeHomeScreen>
 
     final pages = [
       const InboxView(),
-      const CertificateScreen(),
+      const CertificatesView(),
       SettingsView(onSignOut: _signOut),
     ];
 

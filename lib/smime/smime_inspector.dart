@@ -245,10 +245,7 @@ SmimeResult? inspectSmime(
       return SmimeResult(
         status: SmimeStatus.encrypted,
         headline: 'Encrypted message',
-        details: const [
-          'This message is encrypted with S/MIME. Reading encrypted messages '
-              'will be added in a later update.',
-        ],
+        details: const ['This message is encrypted with S/MIME.'],
       );
     }
 
@@ -394,4 +391,19 @@ String _date(DateTime value) {
   final v = value.toLocal();
   return '${v.year}-${v.month.toString().padLeft(2, '0')}-'
       '${v.day.toString().padLeft(2, '0')}';
+}
+
+/// The CMS bytes inside an application/pkcs7-mime message, or null.
+Uint8List? extractPkcs7Content(Uint8List rawMessage) {
+  try {
+    final top = _parseEntity(latin1.decode(rawMessage));
+    final type = top.mediaType;
+    if (type != 'application/pkcs7-mime' &&
+        type != 'application/x-pkcs7-mime') {
+      return null;
+    }
+    return _decodeTransfer(top.body, top.transferEncoding);
+  } catch (_) {
+    return null;
+  }
 }

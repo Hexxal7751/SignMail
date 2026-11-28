@@ -4,6 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers.dart';
 import '../services/mail_service.dart';
+import '../smime/contact_certs.dart';
+import '../smime/identity_dialogs.dart';
+import '../smime/identity_vault.dart';
 
 const Color _mint = Color(0xFF69E0D0);
 const Color _muted = Color(0xFF8F9EAE);
@@ -134,6 +137,10 @@ class _ComposeScreenState extends ConsumerState<ComposeScreen> {
   bool _closing = false;
   String? _error;
 
+  IdentityInfo? _identity;
+  bool _sign = false;
+  bool _encrypt = false;
+
   @override
   void initState() {
     super.initState();
@@ -163,6 +170,20 @@ class _ComposeScreenState extends ConsumerState<ComposeScreen> {
     ]) {
       controller.addListener(_markDirty);
     }
+
+    _loadIdentity();
+  }
+
+  Future<void> _loadIdentity() async {
+    final info = await IdentityVault.instance.info();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _identity = info;
+      // Sign by default when a usable certificate exists.
+      _sign = info != null && !info.isExpired;
+    });
   }
 
   @override
@@ -281,6 +302,49 @@ class _ComposeScreenState extends ConsumerState<ComposeScreen> {
       }
     }
 
+    // Signing and encrypting need the opened certificate.
+    if (_sign || _encrypt) {
+      final identity = await ensureIdentityUnlocked(context);
+      if (!mounted) {
+        return;
+      }
+      if (identity == null) {
+        setState(() {
+          _error = 'Unlock your certificate to sign or encrypt this message, '
+              'or switch Sign and Encrypt off.';
+        });
+        return;
+      }
+    }
+
+    if (_encrypt) {
+      final myAddress =
+          (await ref.read(authServiceProvider).savedEmail() ?? '').toLowerCase();
+      final everyone = <String>{
+        for (final a in <String>[...to.valid, ...cc.valid, ...bcc.valid])
+          a.toLowerCase(),
+      }..remove(myAddress);
+
+      final missing = <String>[];
+      for (final address in everyone) {
+        if (await ContactCerts.instance.forEmail(address) == null) {
+          missing.add(address);
+        }
+      }
+      if (!mounted) {
+        return;
+      }
+      if (missing.isNotEmpty) {
+        setState(() {
+          _error = 'No encryption certificate for: ${missing.join(', ')}. '
+              'You can only encrypt to people whose signed message you have '
+              'opened, or whose certificate you added on the Certificates '
+              'tab.';
+        });
+        return;
+      }
+    }
+
     setState(() {
       _sending = true;
       _error = null;
@@ -306,6 +370,8 @@ class _ComposeScreenState extends ConsumerState<ComposeScreen> {
               inReplyTo: widget.seed.inReplyTo,
               references: widget.seed.references,
               fromName: settings.displayName,
+              sign: _sign,
+              encrypt: _encrypt,
             ),
           );
 
@@ -541,11 +607,14 @@ class _ComposeScreenState extends ConsumerState<ComposeScreen> {
                   ),
                 ),
               ],
-              const SizedBox(height: 14),
-              const Text(
-                'S/MIME signing is not available yet. Messages are sent '
-                'unsigned through your Gmail account.',
-                style: TextStyle(color: _muted, fontSize: 11.5, height: 1.4),
+              const SizedBox(height: 16),
+              _SmimeOptions(
+                identity: _identity,
+                sign: _sign,
+                encrypt: _encrypt,
+                enabled: !_sending,
+                onSign: (value) => setState(() => _sign = value),
+                onEncrypt: (value) => setState(() => _encrypt = value),
               ),
             ],
           ),
@@ -562,5 +631,91 @@ class _ComposeScreenState extends ConsumerState<ComposeScreen> {
       return '${(bytes / 1024).toStringAsFixed(0)} KB';
     }
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+}
+
+/// The Sign / Encrypt switches at the bottom of the editor.
+class _SmimeOptions extends StatelessWidget {
+  const _SmimeOptions({
+    required this.identity,
+    required this.sign,
+    required this.encrypt,
+    required this.enabled,
+    required this.onSign,
+    required this.onEncrypt,
+  });
+
+  final IdentityInfo? identity;
+  final bool sign;
+  final bool encrypt;
+  final bool enabled;
+  final ValueChanged<bool> onSign;
+  final ValueChanged<bool> onEncrypt;
+
+  @override
+  Widget build(BuildContext context) {
+    final info = identity;
+    final available = enabled && info != null;
+
+    String caption;
+    if (info == null) {
+      caption = 'Import your certificate on the Certificates tab to sign and '
+          'encrypt messages. Until then, messages are sent unsigned.';
+    } else if (info.isExpired) {
+      caption = 'Your certificate has expired, so messages cannot be signed.';
+    } else if (sign && encrypt) {
+      caption = 'Signed with your certificate, then encrypted for every '
+          'recipient and for you.';
+    } else if (sign) {
+      caption = 'Signed with your certificate, so recipients can check it '
+          'came from you.';
+    } else if (encrypt) {
+      caption = 'Encrypted for every recipient and for you. Not signed.';
+    } else {
+      caption = 'Sent as an ordinary message (neither signed nor encrypted).';
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF263342)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilterChip(
+                avatar: const Icon(Icons.verified_user_outlined, size: 18),
+                label: const Text('Sign'),
+                selected: sign,
+                showCheckmark: false,
+                selectedColor: const Color(0xFF21423F),
+                onSelected: available && !(info?.isExpired ?? false)
+                    ? onSign
+                    : null,
+              ),
+              FilterChip(
+                avatar: const Icon(Icons.lock_outline_rounded, size: 18),
+                label: const Text('Encrypt'),
+                selected: encrypt,
+                showCheckmark: false,
+                selectedColor: const Color(0xFF21423F),
+                onSelected: available ? onEncrypt : null,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            caption,
+            style: const TextStyle(color: _muted, fontSize: 11.5, height: 1.4),
+          ),
+        ],
+      ),
+    );
   }
 }

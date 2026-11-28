@@ -7,6 +7,7 @@ import '../mail/html_mail_view.dart';
 import '../providers.dart';
 import '../services/attachment_files.dart';
 import '../services/mail_service.dart';
+import '../smime/identity_dialogs.dart';
 import '../smime/smime_inspector.dart';
 import '../smime/trust_service.dart';
 import '../smime/x509.dart';
@@ -286,10 +287,110 @@ class SenderAvatar extends StatelessWidget {
   }
 }
 
+/// Banner about the encryption of the message.
+class _EncryptionBanner extends StatelessWidget {
+  const _EncryptionBanner({
+    required this.state,
+    required this.note,
+    required this.onUnlock,
+  });
+
+  final EncryptionState state;
+  final String? note;
+  final VoidCallback onUnlock;
+
+  @override
+  Widget build(BuildContext context) {
+    if (state == EncryptionState.none) {
+      return const SizedBox.shrink();
+    }
+
+    final Color color;
+    final IconData icon;
+    final String title;
+    String? subtitle;
+
+    switch (state) {
+      case EncryptionState.decrypted:
+        color = const Color(0xFF6FA8FF);
+        icon = Icons.lock_open_rounded;
+        title = 'Encrypted message, opened with your certificate';
+      case EncryptionState.locked:
+        color = const Color(0xFF6FA8FF);
+        icon = Icons.lock_rounded;
+        title = 'Encrypted message';
+        subtitle = 'Unlock your certificate to read it.';
+      case EncryptionState.failed:
+        color = const Color(0xFFE5646E);
+        icon = Icons.lock_rounded;
+        title = 'This encrypted message could not be opened';
+        subtitle = note;
+      case EncryptionState.none:
+        color = _muted;
+        icon = Icons.lock_outline_rounded;
+        title = '';
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: color.withValues(alpha: 0.45)),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: color, size: 22),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      color: color,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 14,
+                    ),
+                  ),
+                  if (subtitle != null)
+                    Text(
+                      subtitle,
+                      style: const TextStyle(color: _muted, fontSize: 12),
+                    ),
+                ],
+              ),
+            ),
+            if (state == EncryptionState.locked)
+              FilledButton(
+                onPressed: onUnlock,
+                style: FilledButton.styleFrom(
+                  backgroundColor: _mint,
+                  foregroundColor: const Color(0xFF071311),
+                ),
+                child: const Text('Unlock'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _SmimeBanner extends StatelessWidget {
-  const _SmimeBanner({required this.result, required this.onTap});
+  const _SmimeBanner({
+    required this.result,
+    required this.encrypted,
+    required this.onTap,
+  });
 
   final SmimeResult? result;
+
+  /// True when the message was encrypted (so "not signed" is worth saying).
+  final bool encrypted;
   final VoidCallback onTap;
 
   @override
@@ -297,15 +398,15 @@ class _SmimeBanner extends StatelessWidget {
     final value = result;
 
     if (value == null) {
-      return const Padding(
-        padding: EdgeInsets.only(bottom: 14),
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 14),
         child: Row(
           children: [
-            Icon(Icons.shield_outlined, size: 14, color: _muted),
-            SizedBox(width: 6),
+            const Icon(Icons.shield_outlined, size: 14, color: _muted),
+            const SizedBox(width: 6),
             Text(
-              'Not signed or encrypted',
-              style: TextStyle(color: _muted, fontSize: 11),
+              encrypted ? 'Not signed' : 'Not signed or encrypted',
+              style: const TextStyle(color: _muted, fontSize: 11),
             ),
           ],
         ),
@@ -686,6 +787,15 @@ class _BodyContentState extends ConsumerState<_BodyContent> {
     );
   }
 
+  Future<void> _unlock() async {
+    final identity = await ensureIdentityUnlocked(context);
+    if (identity != null && mounted) {
+      ref.invalidate(
+        messageBodyProvider((folder: widget.folder, uid: widget.uid)),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final mail = widget.mail;
@@ -693,26 +803,36 @@ class _BodyContentState extends ConsumerState<_BodyContent> {
     final hasHtml = html != null && html.trim().isNotEmpty;
     final showFormatted = hasHtml && _showFormatted;
 
+    final hidden = mail.encryption == EncryptionState.locked ||
+        mail.encryption == EncryptionState.failed;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _SmimeBanner(
-          result: mail.smime,
-          onTap: () {
-            final result = mail.smime;
-            if (result != null) {
-              _showSmimeSheet(context, result, onTrust: _trust);
-            }
-          },
+        _EncryptionBanner(
+          state: mail.encryption,
+          note: mail.encryptionNote,
+          onUnlock: _unlock,
         ),
-        if (mail.toLine.isNotEmpty) ...[
+        if (!hidden)
+          _SmimeBanner(
+            result: mail.smime,
+            encrypted: mail.encryption == EncryptionState.decrypted,
+            onTap: () {
+              final result = mail.smime;
+              if (result != null) {
+                _showSmimeSheet(context, result, onTrust: _trust);
+              }
+            },
+          ),
+        if (!hidden && mail.toLine.isNotEmpty) ...[
           Text(
             'To: ${mail.toLine}',
             style: const TextStyle(color: _muted, fontSize: 12),
           ),
           const SizedBox(height: 12),
         ],
-        if (hasHtml && mail.text.trim().isNotEmpty) ...[
+        if (!hidden && hasHtml && mail.text.trim().isNotEmpty) ...[
           Row(
             children: [
               ChoiceChip(
@@ -732,9 +852,9 @@ class _BodyContentState extends ConsumerState<_BodyContent> {
           ),
           const SizedBox(height: 12),
         ],
-        if (showFormatted)
+        if (!hidden && showFormatted)
           HtmlMailView(html: html, inlineImages: mail.inlineImages)
-        else
+        else if (!hidden)
           SelectableText(
             mail.text.isEmpty
                 ? '(This message has no text content.)'
@@ -745,7 +865,7 @@ class _BodyContentState extends ConsumerState<_BodyContent> {
               color: Color(0xFFDCE4EC),
             ),
           ),
-        if (mail.attachments.isNotEmpty) ...[
+        if (!hidden && mail.attachments.isNotEmpty) ...[
           const SizedBox(height: 24),
           Text(
             'ATTACHMENTS (${mail.attachments.length})',

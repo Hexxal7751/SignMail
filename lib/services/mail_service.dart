@@ -1,13 +1,35 @@
 import 'dart:async' show TimeoutException;
-import 'dart:convert' show base64Encode, utf8;
+import 'dart:convert' show base64Encode, latin1, utf8;
 import 'dart:io' show SocketException, TlsException;
 import 'dart:typed_data' show Uint8List;
 
 import 'package:enough_mail/enough_mail.dart';
 
+import '../smime/cms_envelope.dart';
+import '../smime/cms_sign.dart';
+import '../smime/contact_certs.dart';
+import '../smime/crypto_verify.dart' show Oids;
+import '../smime/identity_vault.dart';
+import '../smime/mime_build.dart';
 import '../smime/smime_inspector.dart';
 import '../smime/trust_service.dart';
+import '../smime/x509.dart';
 import 'gmail_auth_service.dart';
+
+/// What can be said about the encryption of a received message.
+enum EncryptionState {
+  /// The message was not encrypted.
+  none,
+
+  /// The message was encrypted and has been opened.
+  decrypted,
+
+  /// The message is encrypted; the user's certificate must be unlocked.
+  locked,
+
+  /// The message is encrypted but could not be opened.
+  failed,
+}
 
 /// What a mail folder is for.
 enum FolderKind { inbox, starred, sent, drafts, all, spam, trash, other }
@@ -186,6 +208,8 @@ class MailBody {
     this.html,
     this.inlineImages = const <String, InlineImage>{},
     this.smime,
+    this.encryption = EncryptionState.none,
+    this.encryptionNote,
     this.attachments = const <MailAttachment>[],
     this.messageId,
     this.references,
@@ -207,8 +231,12 @@ class MailBody {
   /// Pictures inside the HTML, by lower-case content id.
   final Map<String, InlineImage> inlineImages;
 
-  /// What was found out about S/MIME protection (null: not S/MIME).
+  /// What was found out about the signature (null: not signed).
   final SmimeResult? smime;
+
+  /// Whether the message was encrypted, and how opening it went.
+  final EncryptionState encryption;
+  final String? encryptionNote;
 
   /// Header values needed to reply in the same conversation.
   final String? messageId;
@@ -241,6 +269,8 @@ class OutgoingMail {
     this.inReplyTo,
     this.references,
     this.fromName,
+    this.sign = false,
+    this.encrypt = false,
   });
 
   final List<String> to;
@@ -252,6 +282,12 @@ class OutgoingMail {
   final String? inReplyTo;
   final String? references;
   final String? fromName;
+
+  /// Sign the message with the user's S/MIME certificate.
+  final bool sign;
+
+  /// Encrypt the message for every recipient.
+  final bool encrypt;
 }
 
 /// A mail problem that can be shown to the user as is.
@@ -405,33 +441,100 @@ class MailService {
       }
 
       final message = result.messages.first;
-
-      // S/MIME: check the signature on the raw message as it arrived.
       final senders = message.from;
       final fromEmail =
           (senders != null && senders.isNotEmpty) ? senders.first.email : '';
 
+      // S/MIME: open encryption layers and check signatures on the raw
+      // message exactly as it arrived.
       SmimeResult? smime;
+      var encryption = EncryptionState.none;
+      String? encryptionNote;
+      String? viewEntity;
+
       final raw = _rawBytes(message);
       if (raw != null) {
         try {
+          await IdentityVault.instance.tryAutoUnlock();
           final trust = await TrustService.instance.load();
-          smime = inspectSmime(
-            raw,
-            fromEmail: fromEmail,
-            trust: trust,
-            messageDate: message.decodeDate(),
-          );
+          var current = raw;
+
+          for (var depth = 0; depth < 4; depth++) {
+            final found = inspectSmime(
+              current,
+              fromEmail: fromEmail,
+              trust: trust,
+              messageDate: message.decodeDate(),
+            );
+            if (found == null) {
+              break;
+            }
+
+            if (found.status == SmimeStatus.encrypted) {
+              final identity = IdentityVault.instance.unlocked;
+              final cms = extractPkcs7Content(current);
+
+              if (cms == null) {
+                encryption = EncryptionState.failed;
+                encryptionNote = 'The encrypted data could not be read.';
+                break;
+              }
+              if (identity == null) {
+                encryption = EncryptionState.locked;
+                break;
+              }
+
+              try {
+                final plain = decryptEnvelopedData(
+                  cms,
+                  certificate: identity.certificate,
+                  privateKey: identity.privateKey,
+                );
+                encryption = EncryptionState.decrypted;
+                current = plain;
+                viewEntity = utf8.decode(plain, allowMalformed: true);
+                continue;
+              } on CmsException catch (error) {
+                encryption = EncryptionState.failed;
+                encryptionNote = error.message;
+                break;
+              }
+            }
+
+            smime = found;
+            final inner = found.innerEntity;
+            if (inner != null) {
+              viewEntity = inner;
+              current = Uint8List.fromList(latin1.encode(inner));
+              continue;
+            }
+            break;
+          }
         } catch (_) {
-          smime = null;
+          // The message is still shown; only the S/MIME banner is missing.
         }
       }
 
-      // An opaque signature hides the real message inside the signature.
+      // Remember the certificate of a correctly signing sender, so messages
+      // to that person can be encrypted later.
+      final signerCert = smime?.certificate;
+      if (smime != null &&
+          signerCert != null &&
+          smime.isSigned &&
+          smime.status != SmimeStatus.signedInvalid &&
+          fromEmail.isNotEmpty &&
+          signerCert.emails.contains(fromEmail.toLowerCase()) &&
+          signerCert.isValidAt(DateTime.now())) {
+        try {
+          await ContactCerts.instance.save(signerCert, onlyFor: fromEmail);
+        } catch (_) {
+          // Not critical.
+        }
+      }
+
       MimePart view = message;
-      final innerEntity = smime?.innerEntity;
-      if (innerEntity != null) {
-        final inner = MimeMessage.parseFromText(innerEntity)..parse();
+      if (viewEntity != null) {
+        final inner = MimeMessage.parseFromText(viewEntity)..parse();
         view = inner;
       }
 
@@ -475,6 +578,8 @@ class MailService {
         html: html.isEmpty ? null : html,
         inlineImages: inlineImages,
         smime: smime,
+        encryption: encryption,
+        encryptionNote: encryptionNote,
         toLine: recipients.map(_labelOf).join(', '),
         attachments: attachments,
         wasHtmlOnly: plain.isEmpty && html.isNotEmpty,
@@ -655,6 +760,12 @@ class MailService {
     }
 
     final token = await _token();
+
+    if (mail.sign || mail.encrypt) {
+      await _sendSecure(mail, email, token);
+      return;
+    }
+
     final name = mail.fromName?.trim();
 
     final builder = MessageBuilder(
@@ -690,13 +801,131 @@ class MailService {
     }
 
     final message = builder.buildMimeMessage();
+
+    await _withSmtp(email, token, (client) async {
+      await client.sendMessage(message);
+    });
+  }
+
+  /// Sends a signed and/or encrypted (S/MIME) message.
+  Future<void> _sendSecure(OutgoingMail mail, String email, String token) async {
+    final identity = IdentityVault.instance.unlocked;
+    if (identity == null) {
+      throw const MailServiceException(
+        'Unlock your certificate to sign or encrypt this message.',
+      );
+    }
+
+    final attachments = <MimeAttachmentData>[
+      for (final file in mail.attachments)
+        MimeAttachmentData(
+          name: file.name,
+          mimeType: MediaType.guessFromFileName(file.name).text,
+          bytes: file.bytes,
+        ),
+    ];
+
+    var entity = buildContentEntity(mail.body, attachments);
+
+    try {
+      if (mail.sign) {
+        if (!identity.certificate.isValidAt(DateTime.now())) {
+          throw const MailServiceException(
+            'Your certificate has expired, so it cannot be used to sign.',
+          );
+        }
+        final cms = createSignedData(
+          content: Uint8List.fromList(latin1.encode(entity)),
+          signer: identity.certificate,
+          privateKey: identity.privateKey,
+          chain: identity.chain,
+        );
+        entity = buildSignedEntity(entity, cms, micalgFor(Oids.sha256));
+      }
+
+      if (mail.encrypt) {
+        final everyone = <String>{
+          for (final a in <String>[...mail.to, ...mail.cc, ...mail.bcc])
+            a.trim().toLowerCase(),
+        }..remove(email.toLowerCase());
+
+        final certificates = <X509Certificate>[];
+        final missing = <String>[];
+        final expired = <String>[];
+
+        for (final address in everyone) {
+          final cert = await ContactCerts.instance.forEmail(address);
+          if (cert == null) {
+            missing.add(address);
+          } else if (!cert.isValidAt(DateTime.now())) {
+            expired.add(address);
+          } else {
+            certificates.add(cert);
+          }
+        }
+
+        if (missing.isNotEmpty) {
+          throw MailServiceException(
+            'No encryption certificate for: ${missing.join(', ')}. You can '
+            'only encrypt to people whose signed message you have opened, or '
+            'whose certificate you added on the Certificates tab.',
+          );
+        }
+        if (expired.isNotEmpty) {
+          throw MailServiceException(
+            'The certificate of ${expired.join(', ')} has expired.',
+          );
+        }
+
+        // Also encrypt for yourself, so you can read your own copy.
+        certificates.add(identity.certificate);
+
+        final cms = encryptEnvelopedData(
+          Uint8List.fromList(latin1.encode(entity)),
+          certificates,
+        );
+        entity = buildEnvelopedEntity(cms);
+      }
+    } on CmsException catch (error) {
+      throw MailServiceException(error.message);
+    }
+
+    final headers = buildMessageHeaders(
+      fromName: mail.fromName?.trim(),
+      fromEmail: email,
+      to: mail.to,
+      cc: mail.cc,
+      subject: mail.subject,
+      inReplyTo: mail.inReplyTo,
+      references: mail.references,
+    );
+    final raw = assembleMessage(headers, entity);
+
+    final name = mail.fromName?.trim();
+    final from = MailAddress(name == null || name.isEmpty ? null : name, email);
+    final recipients = <MailAddress>[
+      for (final a in <String>{...mail.to, ...mail.cc, ...mail.bcc})
+        MailAddress(null, a),
+    ];
+
+    await _withSmtp(email, token, (client) async {
+      await client.sendMessageText(raw, from, recipients);
+    });
+  }
+
+  /// Connects to Gmail's SMTP server, signs in, runs [action], disconnects.
+  Future<void> _withSmtp(
+    String email,
+    String token,
+    Future<void> Function(SmtpClient client) action,
+  ) async {
     final client = SmtpClient('signmail.app');
 
     try {
       await client.connectToServer(_smtpHost, _smtpPort, isSecure: true);
       await client.ehlo();
       await client.authenticate(email, token, AuthMechanism.xoauth2);
-      await client.sendMessage(message);
+      await action(client);
     } on MailServiceException {
       rethrow;
     } on SmtpException catch (error) {
