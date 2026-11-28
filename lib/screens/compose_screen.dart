@@ -654,8 +654,9 @@ class _SmimeOptions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final info = identity;
-    final available = enabled && info != null;
+        final info = identity;
+        final canSign = info != null && enabled && !info.isExpired;
+        final canEncrypt = info != null && enabled;
 
     String caption;
     if (info == null) {
@@ -695,9 +696,7 @@ class _SmimeOptions extends StatelessWidget {
                 selected: sign,
                 showCheckmark: false,
                 selectedColor: const Color(0xFF21423F),
-                onSelected: available && !(info?.isExpired ?? false)
-                    ? onSign
-                    : null,
+                onSelected: canSign ? onSign : null,
               ),
               FilterChip(
                 avatar: const Icon(Icons.lock_outline_rounded, size: 18),
@@ -705,8 +704,7 @@ class _SmimeOptions extends StatelessWidget {
                 selected: encrypt,
                 showCheckmark: false,
                 selectedColor: const Color(0xFF21423F),
-                onSelected: available ? onEncrypt : null,
-              ),
+                onSelected: canEncrypt ? onEncrypt : null,              ),
             ],
           ),
           const SizedBox(height: 10),

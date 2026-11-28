@@ -71,8 +71,7 @@ class _IdentityCard extends ConsumerStatefulWidget {
 }
 
 class _IdentityCardState extends ConsumerState<_IdentityCard> {
-  bool _busy = false;
-
+    
   Future<void> _import() async {
     final messenger = ScaffoldMessenger.of(context);
 
@@ -250,8 +249,7 @@ class _IdentityCardState extends ConsumerState<_IdentityCard> {
                 ),
                 const SizedBox(height: 18),
                 FilledButton.icon(
-                  onPressed: _busy ? null : _import,
-                  icon: const Icon(Icons.file_open_outlined),
+                  onPressed: _import,                  icon: const Icon(Icons.file_open_outlined),
                   label: const Text('Import certificate'),
                   style: FilledButton.styleFrom(
                     backgroundColor: _mint,
